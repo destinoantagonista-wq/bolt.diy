@@ -1,5 +1,5 @@
 // Type definitions
-export type ProviderName = 'Ollama' | 'LMStudio' | 'OpenAILike';
+export type ProviderName = 'Ollama' | 'LMStudio' | 'OpenAILike' | 'CLIProxyAPI';
 
 export interface OllamaModel {
   name: string;
@@ -35,10 +35,12 @@ export const PROVIDER_ICONS = {
   Ollama: 'Server',
   LMStudio: 'Monitor',
   OpenAILike: 'Globe',
+  CLIProxyAPI: 'Server',
 } as const;
 
 export const PROVIDER_DESCRIPTIONS = {
   Ollama: 'Run open-source models locally on your machine',
   LMStudio: 'Local model inference with LM Studio',
   OpenAILike: 'Connect to OpenAI-compatible API endpoints',
+  CLIProxyAPI: 'Connect to CLI Proxy API using OpenAI-compatible /v1 endpoints',
 } as const;

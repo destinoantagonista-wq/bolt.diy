@@ -25,6 +25,7 @@ import { workbenchStore } from '~/lib/stores/workbench';
 import { Search } from './Search'; // <-- Ensure Search is imported
 import { classNames } from '~/utils/classNames'; // <-- Import classNames if not already present
 import { LockManager } from './LockManager'; // <-- Import LockManager
+import { isDokployRuntime } from '~/lib/runtime-provider';
 
 interface EditorPanelProps {
   files?: FileMap;
@@ -62,6 +63,7 @@ export const EditorPanel = memo(
 
     const theme = useStore(themeStore);
     const showTerminal = useStore(workbenchStore.showTerminal);
+    const terminalSupported = !isDokployRuntime;
 
     const activeFileSegments = useMemo(() => {
       if (!editorDocument) {
@@ -178,8 +180,12 @@ export const EditorPanel = memo(
             </Panel>
           </PanelGroup>
         </Panel>
-        <PanelResizeHandle />
-        <TerminalTabs />
+        {terminalSupported && (
+          <>
+            <PanelResizeHandle />
+            <TerminalTabs />
+          </>
+        )}
       </PanelGroup>
     );
   },

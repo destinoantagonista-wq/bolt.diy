@@ -1,7 +1,7 @@
 import React from 'react';
 import { ClientOnly } from 'remix-utils/client-only';
 import { classNames } from '~/utils/classNames';
-import { PROVIDER_LIST } from '~/utils/constants';
+import { PROVIDER_LIST, providerBaseUrlEnvKeys } from '~/utils/constants';
 import { ModelSelector } from '~/components/chat/ModelSelector';
 import { APIKeyManager } from './APIKeyManager';
 import { LOCAL_PROVIDERS } from '~/lib/stores/settings';
@@ -57,8 +57,8 @@ interface ChatBoxProps {
   enhancingPrompt?: boolean | undefined;
   enhancePrompt?: (() => void) | undefined;
   onWebSearchResult?: (result: string) => void;
-  chatMode?: 'discuss' | 'build';
-  setChatMode?: (mode: 'discuss' | 'build') => void;
+  chatMode?: 'discuss' | 'build' | 'agent';
+  setChatMode?: (mode: 'discuss' | 'build' | 'agent') => void;
   designScheme?: DesignScheme;
   setDesignScheme?: (scheme: DesignScheme) => void;
   selectedElement?: ElementInfo | null;
@@ -66,6 +66,10 @@ interface ChatBoxProps {
 }
 
 export const ChatBox: React.FC<ChatBoxProps> = (props) => {
+  const hasProviderApiTokenKey = props.provider?.name
+    ? Boolean(providerBaseUrlEnvKeys[props.provider.name]?.apiTokenKey)
+    : false;
+
   return (
     <div
       className={classNames(
@@ -121,7 +125,7 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
               />
               {(props.providerList || []).length > 0 &&
                 props.provider &&
-                !LOCAL_PROVIDERS.includes(props.provider.name) && (
+                (!LOCAL_PROVIDERS.includes(props.provider.name) || hasProviderApiTokenKey) && (
                   <APIKeyManager
                     provider={props.provider}
                     apiKey={props.apiKeys[props.provider.name] || ''}
@@ -217,7 +221,15 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
               event.preventDefault();
 
               if (props.isStreaming) {
+                const hasPendingInput = props.input.trim().length > 0 || props.uploadedFiles.length > 0;
+
+                if (props.chatMode === 'agent' && hasPendingInput) {
+                  props.handleSendMessage?.(event);
+                  return;
+                }
+
                 props.handleStop?.();
+
                 return;
               }
 
@@ -238,7 +250,13 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
             minHeight: props.TEXTAREA_MIN_HEIGHT,
             maxHeight: props.TEXTAREA_MAX_HEIGHT,
           }}
-          placeholder={props.chatMode === 'build' ? 'How can Bolt help you today?' : 'What would you like to discuss?'}
+          placeholder={
+            props.chatMode === 'build'
+              ? 'How can Bolt help you today?'
+              : props.chatMode === 'agent'
+                ? 'Agent mode ativo: descreva a execucao ponta a ponta'
+                : 'What would you like to discuss?'
+          }
           translate="no"
         />
         <ClientOnly>
@@ -249,7 +267,15 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
               disabled={!props.providerList || props.providerList.length === 0}
               onClick={(event) => {
                 if (props.isStreaming) {
+                  const hasPendingInput = props.input.trim().length > 0 || props.uploadedFiles.length > 0;
+
+                  if (props.chatMode === 'agent' && hasPendingInput) {
+                    props.handleSendMessage?.(event);
+                    return;
+                  }
+
                   props.handleStop?.();
+
                   return;
                 }
 
@@ -307,6 +333,21 @@ export const ChatBox: React.FC<ChatBoxProps> = (props) => {
                 {props.chatMode === 'discuss' ? <span>Discuss</span> : <span />}
               </IconButton>
             )}
+            <IconButton
+              title="Agent"
+              className={classNames(
+                'transition-all flex items-center gap-1 px-1.5',
+                props.chatMode === 'agent'
+                  ? '!bg-bolt-elements-item-backgroundAccent !text-bolt-elements-item-contentAccent'
+                  : 'bg-bolt-elements-item-backgroundDefault text-bolt-elements-item-contentDefault',
+              )}
+              onClick={() => {
+                props.setChatMode?.(props.chatMode === 'agent' ? 'build' : 'agent');
+              }}
+            >
+              <div className="i-ph:robot text-xl" />
+              {props.chatMode === 'agent' ? <span>Agent</span> : <span />}
+            </IconButton>
             <IconButton
               title="Model Settings"
               className={classNames('transition-all flex items-center gap-1', {

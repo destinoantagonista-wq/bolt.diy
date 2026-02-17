@@ -1,5 +1,11 @@
 import { type ActionFunctionArgs, type LoaderFunctionArgs, json } from '@remix-run/cloudflare';
 import type { VercelProjectInfo } from '~/types/vercel';
+import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
+
+const isDokployRuntime = (context: unknown) => {
+  const env = (context as any)?.cloudflare?.env as Record<string, unknown> | undefined;
+  return getRuntimeServerConfig(env).runtimeProvider === 'dokploy';
+};
 
 // Function to detect framework from project files
 const detectFramework = (files: Record<string, string>): string => {
@@ -173,7 +179,11 @@ const detectFramework = (files: Record<string, string>): string => {
 };
 
 // Add loader function to handle GET requests
-export async function loader({ request }: LoaderFunctionArgs) {
+export async function loader({ request, context }: LoaderFunctionArgs) {
+  if (isDokployRuntime(context)) {
+    return json({ error: 'External deploy is unavailable in Dokploy runtime V1' }, { status: 403 });
+  }
+
   const url = new URL(request.url);
   const projectId = url.searchParams.get('projectId');
   const token = url.searchParams.get('token');
@@ -240,7 +250,11 @@ interface DeployRequestBody {
 }
 
 // Existing action function for POST requests
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
+  if (isDokployRuntime(context)) {
+    return json({ error: 'External deploy is unavailable in Dokploy runtime V1' }, { status: 403 });
+  }
+
   try {
     const { projectId, files, sourceFiles, token, chatId, framework } = (await request.json()) as DeployRequestBody & {
       token: string;

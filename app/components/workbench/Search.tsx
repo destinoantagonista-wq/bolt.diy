@@ -1,9 +1,10 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
-import type { TextSearchOptions, TextSearchOnProgressCallback, WebContainer } from '@webcontainer/api';
 import { workbenchStore } from '~/lib/stores/workbench';
-import { webcontainer } from '~/lib/webcontainer';
 import { WORK_DIR } from '~/utils/constants';
 import { debounce } from '~/utils/debounce';
+import { isDokployRuntime } from '~/lib/runtime-provider';
+import { runtimeApi } from '~/lib/runtime-client/runtime-api';
+import { runtimeSessionStore } from '~/lib/stores/runtimeSession';
 
 interface DisplayMatch {
   path: string;
@@ -13,8 +14,60 @@ interface DisplayMatch {
   matchCharEnd: number;
 }
 
+interface TextSearchRange {
+  startLineNumber: number;
+  startColumn: number;
+  endColumn: number;
+}
+
+interface TextSearchPreviewMatch {
+  startLineNumber: number;
+}
+
+interface TextSearchPreview {
+  text: string;
+  matches: TextSearchPreviewMatch[];
+}
+
+interface TextSearchApiMatch {
+  preview: TextSearchPreview;
+  ranges: TextSearchRange[];
+}
+
+interface TextSearchOptions {
+  homeDir: string;
+  includes: string[];
+  excludes: string[];
+  gitignore: boolean;
+  requireGit: boolean;
+  globalIgnoreFiles: boolean;
+  ignoreSymlinks: boolean;
+  resultLimit: number;
+  isRegex: boolean;
+  caseSensitive: boolean;
+  isWordMatch: boolean;
+  folders: string[];
+}
+
+type TextSearchOnProgressCallback = (filePath: string, apiMatches: TextSearchApiMatch[]) => void;
+
+interface WebContainerLike {
+  internal?: {
+    textSearch?: (
+      query: string,
+      options: TextSearchOptions,
+      onProgress: TextSearchOnProgressCallback,
+    ) => Promise<unknown>;
+  };
+}
+
+const getWebcontainer = async (): Promise<WebContainerLike> => {
+  const module = await import('~/lib/webcontainer');
+  return await module.webcontainer;
+};
+
 async function performTextSearch(
-  instance: WebContainer,
+  instance: WebContainerLike,
   query: string,
   options: Omit<TextSearchOptions, 'folders'>,
   onProgress: (results: DisplayMatch[]) => void,
@@ -30,13 +83,13 @@ async function performTextSearch(
     folders: [WORK_DIR],
   };
 
-  const progressCallback: TextSearchOnProgressCallback = (filePath: any, apiMatches: any[]) => {
+  const progressCallback: TextSearchOnProgressCallback = (filePath, apiMatches) => {
     const displayMatches: DisplayMatch[] = [];
 
-    apiMatches.forEach((apiMatch: { preview: { text: string; matches: string | any[] }; ranges: any[] }) => {
+    apiMatches.forEach((apiMatch) => {
       const previewLines = apiMatch.preview.text.split('\n');
 
-      apiMatch.ranges.forEach((range: { startLineNumber: number; startColumn: any; endColumn: any }) => {
+      apiMatch.ranges.forEach((range) => {
         let previewLineText = '(Preview line not found)';
         let lineIndexInPreview = -1;
 
@@ -126,7 +179,37 @@ export function Search() {
     const start = Date.now();
 
     try {
-      const instance = await webcontainer;
+      if (isDokployRuntime) {
+        await runtimeSessionStore.ensureSession();
+
+        const runtimeToken = runtimeSessionStore.runtimeToken;
+
+        if (!runtimeToken) {
+          throw new Error('Runtime session is not ready');
+        }
+
+        const { entries } = await runtimeApi.search(runtimeToken, query.trim());
+        const normalizedQuery = query.trim().toLowerCase();
+        const matches = (entries || []).map((entry) => {
+          const virtualPath = entry.virtualPath || `${WORK_DIR}/${entry.path}`;
+          const previewText = entry.path;
+          const highlightIndex = previewText.toLowerCase().indexOf(normalizedQuery);
+
+          return {
+            path: virtualPath,
+            lineNumber: 1,
+            previewText,
+            matchCharStart: highlightIndex >= 0 ? highlightIndex : 0,
+            matchCharEnd: highlightIndex >= 0 ? highlightIndex + normalizedQuery.length : normalizedQuery.length,
+          } satisfies DisplayMatch;
+        });
+
+        setSearchResults(matches);
+
+        return;
+      }
+
+      const instance = await getWebcontainer();
       const options: Omit<TextSearchOptions, 'folders'> = {
         homeDir: WORK_DIR, // Adjust this path as needed
         includes: ['**/*.*'],
@@ -167,6 +250,10 @@ export function Search() {
 
   const handleResultClick = (filePath: string, line?: number) => {
     workbenchStore.setSelectedFile(filePath);
+
+    if (isDokployRuntime) {
+      return;
+    }
 
     /*
      * Adjust line number to be 0-based if it's defined

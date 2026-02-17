@@ -1,27 +1,33 @@
 /**
- * Cleans webcontainer URLs from stack traces to show relative paths instead
+ * Cleans runtime URLs from stack traces to show compact paths.
  */
 export function cleanStackTrace(stackTrace: string): string {
-  // Function to clean a single URL
   const cleanUrl = (url: string): string => {
-    const regex = /^https?:\/\/[^\/]+\.webcontainer-api\.io(\/.*)?$/;
+    try {
+      const parsed = new URL(url);
+      const normalizedPath = parsed.pathname.replace(/^\/+/, '');
 
-    if (!regex.test(url)) {
+      if (!normalizedPath) {
+        return url;
+      }
+
+      if (normalizedPath.startsWith('home/project/')) {
+        return normalizedPath.slice('home/project/'.length);
+      }
+
+      if (normalizedPath.includes('/src/')) {
+        const srcIndex = normalizedPath.indexOf('src/');
+        return normalizedPath.slice(srcIndex);
+      }
+
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch {
       return url;
     }
-
-    const pathRegex = /^https?:\/\/[^\/]+\.webcontainer-api\.io\/(.*?)$/;
-    const match = url.match(pathRegex);
-
-    return match?.[1] || '';
   };
 
-  // Split the stack trace into lines and process each line
   return stackTrace
     .split('\n')
-    .map((line) => {
-      // Match any URL in the line that contains webcontainer-api.io
-      return line.replace(/(https?:\/\/[^\/]+\.webcontainer-api\.io\/[^\s\)]+)/g, (match) => cleanUrl(match));
-    })
+    .map((line) => line.replace(/(https?:\/\/[^\s\)]+)/g, (match) => cleanUrl(match)))
     .join('\n');
 }

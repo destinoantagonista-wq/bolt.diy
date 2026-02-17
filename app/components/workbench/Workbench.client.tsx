@@ -21,14 +21,13 @@ import { renderLogger } from '~/utils/logger';
 import { EditorPanel } from './EditorPanel';
 import { Preview } from './Preview';
 import useViewport from '~/lib/hooks';
-
-import { usePreviewStore } from '~/lib/stores/previews';
 import { chatStore } from '~/lib/stores/chat';
 import type { ElementInfo } from './Inspector';
 import { ExportChatButton } from '~/components/chat/chatExportAndImport/ExportChatButton';
 import { useChatHistory } from '~/lib/persistence';
 import { streamingState } from '~/lib/stores/streaming';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { isDokployRuntime } from '~/lib/runtime-provider';
 
 interface WorkspaceProps {
   chatStarted?: boolean;
@@ -308,6 +307,7 @@ export const Workbench = memo(
     const streaming = useStore(streamingState);
     const { exportChat } = useChatHistory();
     const [isSyncing, setIsSyncing] = useState(false);
+    const terminalSupported = !isDokployRuntime;
 
     const setSelectedView = (view: WorkbenchViewType) => {
       workbenchStore.currentView.set(view);
@@ -339,9 +339,7 @@ export const Workbench = memo(
       workbenchStore
         .saveCurrentDocument()
         .then(() => {
-          // Explicitly refresh all previews after a file save
-          const previewStore = usePreviewStore();
-          previewStore.refreshAllPreviews();
+          workbenchStore.refreshAllPreviews();
         })
         .catch(() => {
           toast.error('Failed to update file content');
@@ -452,18 +450,19 @@ export const Workbench = memo(
                         </DropdownMenu.Root>
                       </div>
 
-                      {/* Toggle Terminal Button */}
-                      <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden ml-1">
-                        <button
-                          onClick={() => {
-                            workbenchStore.toggleTerminal(!workbenchStore.showTerminal.get());
-                          }}
-                          className="rounded-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.7"
-                        >
-                          <div className="i-ph:terminal" />
-                          Toggle Terminal
-                        </button>
-                      </div>
+                      {terminalSupported && (
+                        <div className="flex border border-bolt-elements-borderColor rounded-md overflow-hidden ml-1">
+                          <button
+                            onClick={() => {
+                              workbenchStore.toggleTerminal(!workbenchStore.showTerminal.get());
+                            }}
+                            className="rounded-md items-center justify-center [&:is(:disabled,.disabled)]:cursor-not-allowed [&:is(:disabled,.disabled)]:opacity-60 px-3 py-1.5 text-xs bg-accent-500 text-white hover:text-bolt-elements-item-contentAccent [&:not(:disabled,.disabled)]:hover:bg-bolt-elements-button-primary-backgroundHover outline-accent-500 flex gap-1.7"
+                          >
+                            <div className="i-ph:terminal" />
+                            Toggle Terminal
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 

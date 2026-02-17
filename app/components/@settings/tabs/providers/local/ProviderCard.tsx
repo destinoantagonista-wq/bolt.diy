@@ -32,6 +32,8 @@ function ProviderCard({
         return Monitor;
       case 'OpenAILike':
         return Globe;
+      case 'CLIProxyAPI':
+        return Server;
       default:
         return Server;
     }

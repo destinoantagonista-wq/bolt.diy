@@ -13,6 +13,28 @@ interface ConfiguredProvidersResponse {
   providers: ConfiguredProvider[];
 }
 
+const isPlaceholderValue = (value: string): boolean => {
+  const normalized = value.toLowerCase();
+  return normalized.includes('your_') || normalized.includes('_here');
+};
+
+const isValidBaseUrlLike = (value: string): boolean => {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return false;
+  }
+
+  try {
+    const candidate = trimmed.includes('://') ? trimmed : `http://${trimmed}`;
+    const parsed = new URL(candidate);
+
+    return Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+};
+
 /**
  * API endpoint that detects which providers are configured via environment variables
  * This helps auto-enable providers that have been set up by the user
@@ -51,9 +73,8 @@ export const loader: LoaderFunction = async ({ context }) => {
             envBaseUrl &&
             typeof envBaseUrl === 'string' &&
             envBaseUrl.trim().length > 0 &&
-            !envBaseUrl.includes('your_') && // Filter out placeholder values like "your_openai_like_base_url_here"
-            !envBaseUrl.includes('_here') &&
-            envBaseUrl.startsWith('http'); // Must be a valid URL
+            !isPlaceholderValue(envBaseUrl) &&
+            isValidBaseUrlLike(envBaseUrl);
 
           if (isValidEnvValue) {
             isConfigured = true;
@@ -74,9 +95,7 @@ export const loader: LoaderFunction = async ({ context }) => {
             envApiToken &&
             typeof envApiToken === 'string' &&
             envApiToken.trim().length > 0 &&
-            !envApiToken.includes('your_') && // Filter out placeholder values
-            !envApiToken.includes('_here') &&
-            envApiToken.length > 10; // API keys are typically longer than 10 chars
+            !isPlaceholderValue(envApiToken);
 
           if (isValidApiToken) {
             isConfigured = true;

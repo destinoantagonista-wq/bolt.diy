@@ -17,8 +17,8 @@ interface MessagesProps {
   isStreaming?: boolean;
   messages?: Message[];
   append?: (message: Message) => void;
-  chatMode?: 'discuss' | 'build';
-  setChatMode?: (mode: 'discuss' | 'build') => void;
+  chatMode?: 'discuss' | 'build' | 'agent';
+  setChatMode?: (mode: 'discuss' | 'build' | 'agent') => void;
   model?: string;
   provider?: ProviderInfo;
   addToolResult: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;

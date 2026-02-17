@@ -7,6 +7,7 @@ import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import type { ElementInfo } from './Inspector';
+import { isDokployRuntime } from '~/lib/runtime-provider';
 
 type ResizeSide = 'left' | 'right' | null;
 
@@ -89,6 +90,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [showDeviceFrameInPreview, setShowDeviceFrameInPreview] = useState(false);
   const expoUrl = useStore(expoUrlAtom);
   const [isExpoQrModalOpen, setIsExpoQrModalOpen] = useState(false);
+  const supportsExpoFeatures = !isDokployRuntime;
 
   useEffect(() => {
     if (!activePreview) {
@@ -377,67 +379,54 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
 
   const openInNewWindow = (size: WindowSize) => {
     if (activePreview?.baseUrl) {
-      const match = activePreview.baseUrl.match(/^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/);
+      const previewUrl = iframeUrl || activePreview.baseUrl;
 
-      if (match) {
-        const previewId = match[1];
-        const previewUrl = `/webcontainer/preview/${previewId}`;
+      // Adjust dimensions for landscape mode if applicable
+      let width = size.width;
+      let height = size.height;
 
-        // Adjust dimensions for landscape mode if applicable
-        let width = size.width;
-        let height = size.height;
+      if (isLandscape && (size.frameType === 'mobile' || size.frameType === 'tablet')) {
+        width = size.height;
+        height = size.width;
+      }
 
-        if (isLandscape && (size.frameType === 'mobile' || size.frameType === 'tablet')) {
-          // Swap width and height for landscape mode
-          width = size.height;
-          height = size.width;
+      if (showDeviceFrame && size.hasFrame) {
+        const frameWidth = size.frameType === 'mobile' ? (isLandscape ? 120 : 40) : 60;
+        const frameHeight = size.frameType === 'mobile' ? (isLandscape ? 80 : 80) : isLandscape ? 60 : 100;
+
+        const newWindow = window.open(
+          '',
+          '_blank',
+          `width=${width + frameWidth},height=${height + frameHeight + 40},menubar=no,toolbar=no,location=no,status=no`,
+        );
+
+        if (!newWindow) {
+          console.error('Failed to open new window');
+          return;
         }
 
-        // Create a window with device frame if enabled
-        if (showDeviceFrame && size.hasFrame) {
-          // Calculate frame dimensions
-          const frameWidth = size.frameType === 'mobile' ? (isLandscape ? 120 : 40) : 60; // Width padding on each side
-          const frameHeight = size.frameType === 'mobile' ? (isLandscape ? 80 : 80) : isLandscape ? 60 : 100; // Height padding on top and bottom
+        const frameColor = getFrameColor();
+        const frameRadius = size.frameType === 'mobile' ? '36px' : '20px';
+        const framePadding =
+          size.frameType === 'mobile'
+            ? isLandscape
+              ? '40px 60px'
+              : '40px 20px'
+            : isLandscape
+              ? '30px 50px'
+              : '50px 30px';
+        const notchTop = isLandscape ? '50%' : '20px';
+        const notchLeft = isLandscape ? '30px' : '50%';
+        const notchTransform = isLandscape ? 'translateY(-50%)' : 'translateX(-50%)';
+        const notchWidth = isLandscape ? '8px' : size.frameType === 'mobile' ? '60px' : '80px';
+        const notchHeight = isLandscape ? (size.frameType === 'mobile' ? '60px' : '80px') : '8px';
+        const homeBottom = isLandscape ? '50%' : '15px';
+        const homeRight = isLandscape ? '30px' : '50%';
+        const homeTransform = isLandscape ? 'translateY(50%)' : 'translateX(50%)';
+        const homeWidth = isLandscape ? '4px' : '40px';
+        const homeHeight = isLandscape ? '40px' : '4px';
 
-          // Create a window with the correct dimensions first
-          const newWindow = window.open(
-            '',
-            '_blank',
-            `width=${width + frameWidth},height=${height + frameHeight + 40},menubar=no,toolbar=no,location=no,status=no`,
-          );
-
-          if (!newWindow) {
-            console.error('Failed to open new window');
-            return;
-          }
-
-          // Create the HTML content for the frame
-          const frameColor = getFrameColor();
-          const frameRadius = size.frameType === 'mobile' ? '36px' : '20px';
-          const framePadding =
-            size.frameType === 'mobile'
-              ? isLandscape
-                ? '40px 60px'
-                : '40px 20px'
-              : isLandscape
-                ? '30px 50px'
-                : '50px 30px';
-
-          // Position notch and home button based on orientation
-          const notchTop = isLandscape ? '50%' : '20px';
-          const notchLeft = isLandscape ? '30px' : '50%';
-          const notchTransform = isLandscape ? 'translateY(-50%)' : 'translateX(-50%)';
-          const notchWidth = isLandscape ? '8px' : size.frameType === 'mobile' ? '60px' : '80px';
-          const notchHeight = isLandscape ? (size.frameType === 'mobile' ? '60px' : '80px') : '8px';
-
-          const homeBottom = isLandscape ? '50%' : '15px';
-          const homeRight = isLandscape ? '30px' : '50%';
-          const homeTransform = isLandscape ? 'translateY(50%)' : 'translateX(50%)';
-          const homeWidth = isLandscape ? '4px' : '40px';
-          const homeHeight = isLandscape ? '40px' : '4px';
-
-          // Create HTML content for the wrapper page
-          const htmlContent = `
+        const htmlContent = `
             <!DOCTYPE html>
             <html>
             <head>
@@ -527,24 +516,19 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
             </html>
           `;
 
-          // Write the HTML content to the new window
-          newWindow.document.open();
-          newWindow.document.write(htmlContent);
-          newWindow.document.close();
-        } else {
-          // Standard window without frame
-          const newWindow = window.open(
-            previewUrl,
-            '_blank',
-            `width=${width},height=${height},menubar=no,toolbar=no,location=no,status=no`,
-          );
-
-          if (newWindow) {
-            newWindow.focus();
-          }
-        }
+        newWindow.document.open();
+        newWindow.document.write(htmlContent);
+        newWindow.document.close();
       } else {
-        console.warn('[Preview] Invalid WebContainer URL:', activePreview.baseUrl);
+        const newWindow = window.open(
+          previewUrl,
+          '_blank',
+          `width=${width},height=${height},menubar=no,toolbar=no,location=no,status=no`,
+        );
+
+        if (newWindow) {
+          newWindow.focus();
+        }
       }
     }
   };
@@ -721,9 +705,11 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
             title={isDeviceModeOn ? 'Switch to Responsive Mode' : 'Switch to Device Mode'}
           />
 
-          {expoUrl && <IconButton icon="i-ph:qr-code" onClick={() => setIsExpoQrModalOpen(true)} title="Show QR" />}
+          {supportsExpoFeatures && expoUrl && (
+            <IconButton icon="i-ph:qr-code" onClick={() => setIsExpoQrModalOpen(true)} title="Show QR" />
+          )}
 
-          <ExpoQrModal open={isExpoQrModalOpen} onClose={() => setIsExpoQrModalOpen(false)} />
+          {supportsExpoFeatures && <ExpoQrModal open={isExpoQrModalOpen} onClose={() => setIsExpoQrModalOpen(false)} />}
 
           {isDeviceModeOn && (
             <>
@@ -786,22 +772,10 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                             return;
                           }
 
-                          const match = activePreview.baseUrl.match(
-                            /^https?:\/\/([^.]+)\.local-credentialless\.webcontainer-api\.io/,
-                          );
-
-                          if (!match) {
-                            console.warn('[Preview] Invalid WebContainer URL:', activePreview.baseUrl);
-                            return;
-                          }
-
-                          const previewId = match[1];
-                          const previewUrl = `/webcontainer/preview/${previewId}`;
-
                           // Open in a new window with simple parameters
                           window.open(
-                            previewUrl,
-                            `preview-${previewId}`,
+                            iframeUrl || activePreview.baseUrl,
+                            `preview-${Date.now()}`,
                             'width=1280,height=720,menubar=no,toolbar=no,location=no,status=no,resizable=yes',
                           );
                         }}

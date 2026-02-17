@@ -527,6 +527,71 @@ function SetupGuide({ onBack }: { onBack: () => void }) {
         </CardContent>
       </Card>
 
+      {/* CLI Proxy API Setup Section */}
+      <Card className="bg-bolt-elements-background-depth-2 shadow-sm">
+        <CardHeader className="pb-6">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500/20 to-cyan-600/20 flex items-center justify-center ring-1 ring-cyan-500/30">
+              <Server className="w-6 h-6 text-cyan-500" />
+            </div>
+            <div className="flex-1">
+              <h3 className="text-xl font-semibold text-bolt-elements-textPrimary">CLI Proxy API Setup</h3>
+              <p className="text-sm text-bolt-elements-textSecondary">
+                OpenAI-compatible inference endpoint for CLI Proxy API
+              </p>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="space-y-4">
+            <h4 className="font-medium text-bolt-elements-textPrimary flex items-center gap-2">
+              <Settings className="w-4 h-4" />
+              1. Configure endpoint and key
+            </h4>
+            <div className="p-4 rounded-lg bg-bolt-elements-background-depth-3">
+              <div className="text-xs bg-bolt-elements-background-depth-4 p-3 rounded font-mono text-bolt-elements-textPrimary space-y-1">
+                <div># Recommended endpoint in bolt.diy</div>
+                <div>http://127.0.0.1:8317/v1</div>
+                <div></div>
+                <div># Environment variables</div>
+                <div>CLI_PROXY_API_BASE_URL=http://127.0.0.1:8317/v1</div>
+                <div>CLI_PROXY_API_KEY=your_proxy_api_key</div>
+                <div>CLI_PROXY_API_MODELS=optional_model_fallback_list</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <h4 className="font-medium text-bolt-elements-textPrimary flex items-center gap-2">
+              <Globe className="w-4 h-4" />
+              2. Open the management panel separately
+            </h4>
+            <div className="p-4 rounded-lg bg-cyan-500/5 border border-cyan-500/20">
+              <p className="text-sm text-bolt-elements-textSecondary mb-3">
+                Use the management UI to manage provider credentials and API keys, then use the `/v1` endpoint in
+                bolt.diy for inference traffic.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="bg-gradient-to-r from-cyan-500/10 to-cyan-600/10 hover:from-cyan-500/20 hover:to-cyan-600/20 border-cyan-500/30 hover:border-cyan-500/50 transition-all duration-300 gap-2 group shadow-sm hover:shadow-lg hover:shadow-cyan-500/20 font-medium"
+                _asChild
+              >
+                <a
+                  href="http://127.0.0.1:8317/management.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2"
+                >
+                  <ExternalLink className="w-4 h-4 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all duration-300 flex-shrink-0" />
+                  <span className="flex-1 text-center font-medium">Open Management Center</span>
+                </a>
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Performance Optimization */}
       <Card className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 border border-purple-500/20 shadow-sm">
         <CardHeader className="pb-4">

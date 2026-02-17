@@ -34,6 +34,10 @@ export type ActionStateUpdate =
 
 type ActionsMap = MapStore<Record<string, ActionState>>;
 
+interface ActionRunnerOptions {
+  runtimeProvider?: 'webcontainer' | 'dokploy';
+}
+
 class ActionCommandError extends Error {
   readonly _output: string;
   readonly _header: string;
@@ -65,6 +69,7 @@ class ActionCommandError extends Error {
 
 export class ActionRunner {
   #webcontainer: Promise<WebContainer>;
+  #runtimeProvider: 'webcontainer' | 'dokploy';
   #currentExecutionPromise: Promise<void> = Promise.resolve();
   #shellTerminal: () => BoltShell;
   runnerId = atom<string>(`${Date.now()}`);
@@ -80,12 +85,14 @@ export class ActionRunner {
     onAlert?: (alert: ActionAlert) => void,
     onSupabaseAlert?: (alert: SupabaseAlert) => void,
     onDeployAlert?: (alert: DeployAlert) => void,
+    options?: ActionRunnerOptions,
   ) {
     this.#webcontainer = webcontainerPromise;
     this.#shellTerminal = getShellTerminal;
     this.onAlert = onAlert;
     this.onSupabaseAlert = onSupabaseAlert;
     this.onDeployAlert = onDeployAlert;
+    this.#runtimeProvider = options?.runtimeProvider || 'webcontainer';
   }
 
   addAction(data: ActionCallbackData) {
@@ -154,6 +161,21 @@ export class ActionRunner {
     this.#updateAction(actionId, { status: 'running' });
 
     try {
+      if (this.#runtimeProvider === 'dokploy' && ['shell', 'start', 'build'].includes(action.type)) {
+        this.#updateAction(actionId, {
+          status: 'failed',
+          error: 'unsupported_in_v1',
+        });
+        this.onAlert?.({
+          type: 'error',
+          title: 'Action unavailable in Dokploy V1',
+          description: `Action type "${action.type}" is not supported in Dokploy runtime V1.`,
+          content: action.content,
+        });
+
+        return;
+      }
+
       switch (action.type) {
         case 'shell': {
           await this.#runShellAction(action);
@@ -313,6 +335,10 @@ export class ActionRunner {
       unreachable('Expected file action');
     }
 
+    if (this.#runtimeProvider === 'dokploy') {
+      return;
+    }
+
     const webcontainer = await this.#webcontainer;
     const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
 
@@ -345,6 +371,10 @@ export class ActionRunner {
   }
 
   async getFileHistory(filePath: string): Promise<FileHistory | null> {
+    if (this.#runtimeProvider === 'dokploy') {
+      return null;
+    }
+
     try {
       const webcontainer = await this.#webcontainer;
       const historyPath = this.#getHistoryPath(filePath);

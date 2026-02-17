@@ -9,7 +9,9 @@ import { LLMManager } from '~/lib/modules/llm/manager';
 import { createScopedLogger } from '~/utils/logger';
 import { createFilesContext, extractPropertiesFromMessage } from './utils';
 import { discussPrompt } from '~/lib/common/prompts/discuss-prompt';
+import { agentModePrompt } from '~/lib/common/prompts/agent-mode-prompt';
 import type { DesignScheme } from '~/types/design-scheme';
+import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
 
 export type Messages = Message[];
 
@@ -43,8 +45,33 @@ function getCompletionTokenLimit(modelDetails: any): number {
   return Math.min(MAX_TOKENS, 16384);
 }
 
-function sanitizeText(text: string): string {
-  let sanitized = text.replace(/<div class=\\"__boltThought__\\">.*?<\/div>/s, '');
+function extractTextValue(input: unknown): string {
+  if (typeof input === 'string') {
+    return input;
+  }
+
+  if (!Array.isArray(input)) {
+    return '';
+  }
+
+  return input
+    .map((part: any) => {
+      if (!part || typeof part !== 'object') {
+        return '';
+      }
+
+      if ((part.type === 'text' || part.type === 'reasoning') && typeof part.text === 'string') {
+        return part.text;
+      }
+
+      return '';
+    })
+    .join('');
+}
+
+function sanitizeText(text: unknown): string {
+  const rawText = extractTextValue(text);
+  let sanitized = rawText.replace(/<div class=\\"__boltThought__\\">.*?<\/div>/s, '');
   sanitized = sanitized.replace(/<think>.*?<\/think>/s, '');
   sanitized = sanitized.replace(/<boltAction type="file" filePath="package-lock\.json">[\s\S]*?<\/boltAction>/g, '');
 
@@ -63,7 +90,8 @@ export async function streamText(props: {
   contextFiles?: FileMap;
   summary?: string;
   messageSliceId?: number;
-  chatMode?: 'discuss' | 'build';
+  chatMode?: 'discuss' | 'build' | 'agent';
+  agentExecutionPlan?: string;
   designScheme?: DesignScheme;
 }) {
   const {
@@ -78,6 +106,7 @@ export async function streamText(props: {
     contextFiles,
     summary,
     chatMode,
+    agentExecutionPlan,
     designScheme,
   } = props;
   let currentModel = DEFAULT_MODEL;
@@ -149,7 +178,9 @@ export async function streamText(props: {
     `Token limits for model ${modelDetails.name}: maxTokens=${safeMaxTokens}, maxTokenAllowed=${modelDetails.maxTokenAllowed}, maxCompletionTokens=${modelDetails.maxCompletionTokens}`,
   );
 
-  let systemPrompt =
+  const isAgentMode = chatMode === 'agent';
+
+  let buildSystemPrompt =
     PromptLibrary.getPropmtFromLibrary(promptId || 'default', {
       cwd: WORK_DIR,
       allowedHtmlElements: allowedHTMLElements,
@@ -162,26 +193,72 @@ export async function streamText(props: {
       },
     }) ?? getSystemPrompt();
 
-  if (chatMode === 'build' && contextFiles && contextOptimization) {
-    const codeContext = createFilesContext(contextFiles, true);
+  let discussSystemPrompt = discussPrompt();
+  let agentSystemPrompt = agentModePrompt(buildSystemPrompt);
+  const runtimeProvider = getRuntimeServerConfig(
+    serverEnv as unknown as Record<string, unknown> | undefined,
+  ).runtimeProvider;
 
-    systemPrompt = `${systemPrompt}
+  if (runtimeProvider === 'dokploy') {
+    const dokployRuntimeInstructions = `
+<dokploy_v1_runtime_constraints>
+  - This workspace runs on a remote Dokploy runtime.
+  - V1 supports file editing and remote preview only.
+  - NEVER emit shell/start/build actions.
+  - Focus on <boltAction type="file"> actions.
+  - Do not ask the user to run terminal commands manually.
+  - Git clone/import, external deploy providers, and Expo QR flows are unavailable in V1.
+  - Search capabilities are limited to file name/path, not full-text grep.
+</dokploy_v1_runtime_constraints>
+`;
 
-    Below is the artifact containing the context loaded into context buffer for you to have knowledge of and might need changes to fullfill current user request.
+    buildSystemPrompt = `${buildSystemPrompt}\n${dokployRuntimeInstructions}`;
+    agentSystemPrompt = `${agentSystemPrompt}\n${dokployRuntimeInstructions}`;
+    discussSystemPrompt = `${discussSystemPrompt}\n\nFor this project runtime, assume Dokploy V1 constraints: no shell actions, file edits + preview only.`;
+  }
+
+  const shouldInjectContext = !!contextFiles && !!contextOptimization && (chatMode === 'build' || isAgentMode);
+
+  if (shouldInjectContext) {
+    const codeContext = createFilesContext(contextFiles as FileMap, true);
+
+    const contextIntro =
+      chatMode === 'agent'
+        ? 'Below is the artifact containing source context for execution. Use it to implement the request end-to-end and verify outcomes.'
+        : 'Below is the artifact containing the context loaded into context buffer for you to have knowledge of and might need changes to fullfill current user request.';
+
+    const contextBlock = `
+    ${contextIntro}
     CONTEXT BUFFER:
     ---
     ${codeContext}
     ---
     `;
 
+    if (chatMode === 'build') {
+      buildSystemPrompt = `${buildSystemPrompt}${contextBlock}`;
+    } else if (isAgentMode) {
+      agentSystemPrompt = `${agentSystemPrompt}${contextBlock}`;
+    } else {
+      discussSystemPrompt = `${discussSystemPrompt}${contextBlock}`;
+    }
+
     if (summary) {
-      systemPrompt = `${systemPrompt}
+      const summaryBlock = `
       below is the chat history till now
       CHAT SUMMARY:
       ---
       ${props.summary}
       ---
       `;
+
+      if (chatMode === 'build') {
+        buildSystemPrompt = `${buildSystemPrompt}${summaryBlock}`;
+      } else if (isAgentMode) {
+        agentSystemPrompt = `${agentSystemPrompt}${summaryBlock}`;
+      } else {
+        discussSystemPrompt = `${discussSystemPrompt}${summaryBlock}`;
+      }
 
       if (props.messageSliceId) {
         processedMessages = processedMessages.slice(props.messageSliceId);
@@ -209,14 +286,30 @@ export async function streamText(props: {
     const lockedFilesListString = Array.from(effectiveLockedFilePaths)
       .map((filePath) => `- ${filePath}`)
       .join('\n');
-    systemPrompt = `${systemPrompt}
+    const lockedFilesPrompt = `
 
     IMPORTANT: The following files are locked and MUST NOT be modified in any way. Do not suggest or make any changes to these files. You can proceed with the request but DO NOT make any changes to these files specifically:
     ${lockedFilesListString}
     ---
     `;
+
+    if (chatMode === 'build') {
+      buildSystemPrompt = `${buildSystemPrompt}${lockedFilesPrompt}`;
+    } else if (isAgentMode) {
+      agentSystemPrompt = `${agentSystemPrompt}${lockedFilesPrompt}`;
+    }
   } else {
     console.log('No locked files found from any source for prompt.');
+  }
+
+  if (isAgentMode && agentExecutionPlan) {
+    agentSystemPrompt = `${agentSystemPrompt}
+
+    AGENT EXECUTION BRIEF:
+    ---
+    ${agentExecutionPlan}
+    ---
+    `;
   }
 
   logger.info(`Sending llm call to ${provider.name} with model ${modelDetails.name}`);
@@ -273,6 +366,9 @@ export async function streamText(props: {
     ),
   );
 
+  const selectedSystemPrompt =
+    chatMode === 'discuss' ? discussSystemPrompt : chatMode === 'agent' ? agentSystemPrompt : buildSystemPrompt;
+
   const streamParams = {
     model: provider.getModelInstance({
       model: modelDetails.name,
@@ -280,7 +376,7 @@ export async function streamText(props: {
       apiKeys,
       providerSettings,
     }),
-    system: chatMode === 'build' ? systemPrompt : discussPrompt(),
+    system: selectedSystemPrompt,
     ...tokenParams,
     messages: convertToCoreMessages(processedMessages as any),
     ...filteredOptions,

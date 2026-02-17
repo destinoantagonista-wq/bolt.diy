@@ -1,16 +1,24 @@
 import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
-import { json, type MetaFunction } from '@remix-run/cloudflare';
+import { json, redirect, type MetaFunction } from '@remix-run/cloudflare';
 import { ClientOnly } from 'remix-utils/client-only';
 import { BaseChat } from '~/components/chat/BaseChat';
 import { GitUrlImport } from '~/components/git/GitUrlImport.client';
 import { Header } from '~/components/header/Header';
 import BackgroundRays from '~/components/ui/BackgroundRays';
+import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
 
 export const meta: MetaFunction = () => {
   return [{ title: 'Bolt' }, { name: 'description', content: 'Talk with Bolt, an AI assistant from StackBlitz' }];
 };
 
 export async function loader(args: LoaderFunctionArgs) {
+  const env = (args.context as any)?.cloudflare?.env as Record<string, unknown> | undefined;
+  const config = getRuntimeServerConfig(env);
+
+  if (config.runtimeProvider === 'dokploy') {
+    throw redirect('/');
+  }
+
   return json({ url: args.params.url });
 }
 

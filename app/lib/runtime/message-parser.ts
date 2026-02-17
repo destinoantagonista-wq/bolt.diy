@@ -145,20 +145,7 @@ export class StreamingMessageParser {
 
           if (closeIndex !== -1) {
             currentAction.content += input.slice(i, closeIndex);
-
-            let content = currentAction.content.trim();
-
-            if ('type' in currentAction && currentAction.type === 'file') {
-              // Remove markdown code block syntax if present and file is not markdown
-              if (!currentAction.filePath.endsWith('.md')) {
-                content = cleanoutMarkdownSyntax(content);
-                content = cleanEscapedTags(content);
-              }
-
-              content += '\n';
-            }
-
-            currentAction.content = content;
+            currentAction.content = this.#normalizeActionContent(currentAction, currentAction.content);
 
             this._options.callbacks?.onActionClose?.({
               artifactId: currentArtifact.id,
@@ -331,8 +318,73 @@ export class StreamingMessageParser {
     return output;
   }
 
+  finalize(messageId: string, input?: string) {
+    if (typeof input === 'string') {
+      this.parse(messageId, input);
+    }
+
+    const state = this.#messages.get(messageId);
+
+    if (!state || !state.insideArtifact || !state.currentArtifact) {
+      return;
+    }
+
+    const currentArtifact = state.currentArtifact;
+
+    if (state.insideAction) {
+      const currentAction = state.currentAction;
+
+      if (typeof input === 'string' && state.position < input.length) {
+        currentAction.content += input.slice(state.position);
+      }
+
+      currentAction.content = this.#normalizeActionContent(currentAction, currentAction.content);
+
+      this._options.callbacks?.onActionClose?.({
+        artifactId: currentArtifact.id,
+        messageId,
+        actionId: String(state.actionId - 1),
+        action: currentAction as BoltAction,
+      });
+
+      state.insideAction = false;
+      state.currentAction = { content: '' };
+    }
+
+    this._options.callbacks?.onArtifactClose?.({
+      messageId,
+      artifactId: currentArtifact.id,
+      ...currentArtifact,
+    });
+
+    state.insideArtifact = false;
+    state.currentArtifact = undefined;
+
+    if (typeof input === 'string') {
+      state.position = input.length;
+    }
+  }
+
   reset() {
     this.#messages.clear();
+  }
+
+  #normalizeActionContent(currentAction: BoltActionData, content: string): string {
+    let normalized = content.trim();
+
+    if ('type' in currentAction && currentAction.type === 'file') {
+      const filePath = currentAction.filePath || '';
+
+      // Remove markdown code block syntax if present and file is not markdown
+      if (!filePath.endsWith('.md')) {
+        normalized = cleanoutMarkdownSyntax(normalized);
+        normalized = cleanEscapedTags(normalized);
+      }
+
+      normalized += '\n';
+    }
+
+    return normalized;
   }
 
   #parseActionTag(input: string, actionOpenIndex: number, actionEndIndex: number) {

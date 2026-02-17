@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { localModelHealthMonitor, type ModelHealthStatus } from '~/lib/services/localModelHealthMonitor';
+import {
+  localModelHealthMonitor,
+  type LocalProviderName,
+  type ModelHealthStatus,
+} from '~/lib/services/localModelHealthMonitor';
 
 export interface UseLocalModelHealthOptions {
   autoStart?: boolean;
@@ -8,11 +12,11 @@ export interface UseLocalModelHealthOptions {
 
 export interface UseLocalModelHealthReturn {
   healthStatuses: ModelHealthStatus[];
-  getHealthStatus: (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => ModelHealthStatus | undefined;
-  startMonitoring: (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string, checkInterval?: number) => void;
-  stopMonitoring: (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => void;
-  performHealthCheck: (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => Promise<void>;
-  isHealthy: (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => boolean;
+  getHealthStatus: (provider: LocalProviderName, baseUrl: string) => ModelHealthStatus | undefined;
+  startMonitoring: (provider: LocalProviderName, baseUrl: string, checkInterval?: number) => void;
+  stopMonitoring: (provider: LocalProviderName, baseUrl: string) => void;
+  performHealthCheck: (provider: LocalProviderName, baseUrl: string) => Promise<void>;
+  isHealthy: (provider: LocalProviderName, baseUrl: string) => boolean;
   getOverallHealth: () => { healthy: number; unhealthy: number; checking: number; unknown: number };
 }
 
@@ -51,13 +55,13 @@ export function useLocalModelHealth(options: UseLocalModelHealthOptions = {}): U
   }, []);
 
   // Get health status for a specific provider
-  const getHealthStatus = useCallback((provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => {
+  const getHealthStatus = useCallback((provider: LocalProviderName, baseUrl: string) => {
     return localModelHealthMonitor.getHealthStatus(provider, baseUrl);
   }, []);
 
   // Start monitoring a provider
   const startMonitoring = useCallback(
-    (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string, interval?: number) => {
+    (provider: LocalProviderName, baseUrl: string, interval?: number) => {
       console.log(`[Health Monitor] Starting monitoring for ${provider} at ${baseUrl}`);
       localModelHealthMonitor.startMonitoring(provider, baseUrl, interval || checkInterval);
     },
@@ -65,7 +69,7 @@ export function useLocalModelHealth(options: UseLocalModelHealthOptions = {}): U
   );
 
   // Stop monitoring a provider
-  const stopMonitoring = useCallback((provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => {
+  const stopMonitoring = useCallback((provider: LocalProviderName, baseUrl: string) => {
     console.log(`[Health Monitor] Stopping monitoring for ${provider} at ${baseUrl}`);
     localModelHealthMonitor.stopMonitoring(provider, baseUrl);
 
@@ -74,13 +78,13 @@ export function useLocalModelHealth(options: UseLocalModelHealthOptions = {}): U
   }, []);
 
   // Perform manual health check
-  const performHealthCheck = useCallback(async (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => {
+  const performHealthCheck = useCallback(async (provider: LocalProviderName, baseUrl: string) => {
     await localModelHealthMonitor.performHealthCheck(provider, baseUrl);
   }, []);
 
   // Check if a provider is healthy
   const isHealthy = useCallback(
-    (provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string) => {
+    (provider: LocalProviderName, baseUrl: string) => {
       const status = getHealthStatus(provider, baseUrl);
       return status?.status === 'healthy';
     },
@@ -113,7 +117,7 @@ export function useLocalModelHealth(options: UseLocalModelHealthOptions = {}): U
  * Hook for monitoring a specific provider
  */
 export function useProviderHealth(
-  provider: 'Ollama' | 'LMStudio' | 'OpenAILike',
+  provider: LocalProviderName,
   baseUrl: string,
   options: UseLocalModelHealthOptions = {},
 ) {

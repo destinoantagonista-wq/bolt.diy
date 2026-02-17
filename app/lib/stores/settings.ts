@@ -23,8 +23,10 @@ export interface Shortcuts {
   toggleTerminal: Shortcut;
 }
 
-export const URL_CONFIGURABLE_PROVIDERS = ['Ollama', 'LMStudio', 'OpenAILike'];
-export const LOCAL_PROVIDERS = ['OpenAILike', 'LMStudio', 'Ollama'];
+export const URL_CONFIGURABLE_PROVIDERS = ['CLIProxyAPI'];
+export const LOCAL_PROVIDERS = ['CLIProxyAPI'];
+
+const DEFAULT_ENABLED_LOCAL_PROVIDERS = ['CLIProxyAPI'];
 
 export type ProviderSetting = Record<string, IProviderConfig>;
 
@@ -88,11 +90,14 @@ const getInitialProviderSettings = (): ProviderSetting => {
 
   // Start with default settings
   PROVIDER_LIST.forEach((provider) => {
+    const isDefaultEnabledLocal =
+      LOCAL_PROVIDERS.includes(provider.name) && DEFAULT_ENABLED_LOCAL_PROVIDERS.includes(provider.name);
+
     initialSettings[provider.name] = {
       ...provider,
       settings: {
-        // Local providers should be disabled by default
-        enabled: !LOCAL_PROVIDERS.includes(provider.name),
+        // Local providers stay disabled by default, except selected local providers we intentionally pre-enable.
+        enabled: isDefaultEnabledLocal || !LOCAL_PROVIDERS.includes(provider.name),
       },
     };
   });

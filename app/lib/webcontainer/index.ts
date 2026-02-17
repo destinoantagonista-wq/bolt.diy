@@ -1,4 +1,5 @@
 import { WebContainer } from '@webcontainer/api';
+import { isDokployRuntime } from '~/lib/runtime-provider';
 import { WORK_DIR_NAME } from '~/utils/constants';
 import { cleanStackTrace } from '~/utils/stacktrace';
 
@@ -18,7 +19,7 @@ export let webcontainer: Promise<WebContainer> = new Promise(() => {
   // noop for ssr
 });
 
-if (!import.meta.env.SSR) {
+if (!import.meta.env.SSR && !isDokployRuntime) {
   webcontainer =
     import.meta.hot?.data.webcontainer ??
     Promise.resolve()

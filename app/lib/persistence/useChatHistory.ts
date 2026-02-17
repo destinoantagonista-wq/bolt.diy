@@ -19,9 +19,9 @@ import {
 } from './db';
 import type { FileMap } from '~/lib/stores/files';
 import type { Snapshot } from './types';
-import { webcontainer } from '~/lib/webcontainer';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
+import { isDokployRuntime } from '~/lib/runtime-provider';
 
 export interface ChatHistoryItem {
   id: string;
@@ -224,13 +224,37 @@ ${value.content}
 
   const restoreSnapshot = useCallback(async (id: string, snapshot?: Snapshot) => {
     // const snapshotStr = localStorage.getItem(`snapshot:${id}`); // Remove localStorage usage
-    const container = await webcontainer;
-
     const validSnapshot = snapshot || { chatIndex: '', files: {} };
 
     if (!validSnapshot?.files) {
       return;
     }
+
+    if (isDokployRuntime) {
+      for (const [filePath, value] of Object.entries(validSnapshot.files)) {
+        if (value?.type === 'folder') {
+          await workbenchStore.createFolder(filePath);
+        }
+      }
+
+      for (const [filePath, value] of Object.entries(validSnapshot.files)) {
+        if (value?.type !== 'file') {
+          continue;
+        }
+
+        if (value.isBinary) {
+          const binaryContent = Uint8Array.from(atob(value.content), (char) => char.charCodeAt(0));
+          await workbenchStore.createFile(filePath, binaryContent);
+        } else {
+          await workbenchStore.createFile(filePath, value.content);
+        }
+      }
+
+      return;
+    }
+
+    const { webcontainer } = await import('~/lib/webcontainer');
+    const container = await webcontainer;
 
     Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
       if (key.startsWith(container.workdir)) {

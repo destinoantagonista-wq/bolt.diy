@@ -49,13 +49,65 @@ const messageParser = new EnhancedStreamingMessageParser({
     },
   },
 });
-const extractTextContent = (message: Message) =>
-  Array.isArray(message.content)
-    ? (message.content.find((item) => item.type === 'text')?.text as string) || ''
-    : message.content;
+
+const extractTextFromContent = (content: unknown) => {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .map((item: any) => {
+      if (!item || typeof item !== 'object') {
+        return '';
+      }
+
+      if ((item.type === 'text' || item.type === 'reasoning') && typeof item.text === 'string') {
+        return item.text;
+      }
+
+      return '';
+    })
+    .join('');
+};
+
+const extractTextFromParts = (message: Message) => {
+  const parts = (message as any).parts;
+
+  if (!Array.isArray(parts)) {
+    return '';
+  }
+
+  return parts
+    .map((part: any) => {
+      if (!part || typeof part !== 'object') {
+        return '';
+      }
+
+      if ((part.type === 'text' || part.type === 'reasoning') && typeof part.text === 'string') {
+        return part.text;
+      }
+
+      return '';
+    })
+    .join('');
+};
+
+const extractTextContent = (message: Message) => {
+  const contentText = extractTextFromContent(message.content);
+
+  if (contentText.length > 0) {
+    return contentText;
+  }
+
+  return extractTextFromParts(message);
+};
 
 export function useMessageParser() {
-  const [parsedMessages, setParsedMessages] = useState<{ [key: number]: string }>({});
+  const [parsedMessages, setParsedMessages] = useState<Record<string, string>>({});
 
   const parseMessages = useCallback((messages: Message[], isLoading: boolean) => {
     let reset = false;
@@ -65,15 +117,38 @@ export function useMessageParser() {
       messageParser.reset();
     }
 
-    for (const [index, message] of messages.entries()) {
-      if (message.role === 'assistant' || message.role === 'user') {
-        const newParsedContent = messageParser.parse(message.id, extractTextContent(message));
-        setParsedMessages((prevParsed) => ({
-          ...prevParsed,
-          [index]: !reset ? (prevParsed[index] || '') + newParsedContent : newParsedContent,
-        }));
+    setParsedMessages((previousParsed) => {
+      const nextParsed = reset ? {} : { ...previousParsed };
+      const activeAssistantMessageIds = new Set<string>();
+
+      for (const message of messages) {
+        if (message.role !== 'assistant') {
+          continue;
+        }
+
+        const messageId = message.id;
+        activeAssistantMessageIds.add(messageId);
+
+        const messageContent = extractTextContent(message);
+        const newParsedContent = messageParser.parse(messageId, messageContent);
+
+        if (!isLoading) {
+          messageParser.finalize(messageId, messageContent);
+        }
+
+        if (newParsedContent.length > 0) {
+          nextParsed[messageId] = !reset ? (nextParsed[messageId] || '') + newParsedContent : newParsedContent;
+        }
       }
-    }
+
+      for (const parsedMessageId of Object.keys(nextParsed)) {
+        if (!activeAssistantMessageIds.has(parsedMessageId)) {
+          delete nextParsed[parsedMessageId];
+        }
+      }
+
+      return nextParsed;
+    });
   }, []);
 
   return { parsedMessages, parseMessages };

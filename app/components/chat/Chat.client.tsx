@@ -28,6 +28,7 @@ import type { ElementInfo } from '~/components/workbench/Inspector';
 import type { TextUIPart, FileUIPart, Attachment } from '@ai-sdk/ui-utils';
 import { useMCPStore } from '~/lib/stores/mcp';
 import type { LlmErrorAlertType } from '~/types/actions';
+import type { AgentQueueItem } from '~/types/agent-queue';
 
 const logger = createScopedLogger('Chat');
 
@@ -73,6 +74,62 @@ const processSampledMessages = createSampler(
   50,
 );
 
+const extractTextFromContent = (content: unknown) => {
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return '';
+  }
+
+  return content
+    .map((part: any) => {
+      if (!part || typeof part !== 'object') {
+        return '';
+      }
+
+      if ((part.type === 'text' || part.type === 'reasoning') && typeof part.text === 'string') {
+        return part.text;
+      }
+
+      return '';
+    })
+    .join('');
+};
+
+const getTextFromParts = (message: Message) => {
+  const parts = (message as any).parts;
+
+  if (!Array.isArray(parts)) {
+    return '';
+  }
+
+  return parts
+    .map((part: any) => {
+      if (!part || typeof part !== 'object') {
+        return '';
+      }
+
+      if ((part.type === 'text' || part.type === 'reasoning') && typeof part.text === 'string') {
+        return part.text;
+      }
+
+      return '';
+    })
+    .join('');
+};
+
+const getTextMessageContent = (message: Message) => {
+  const contentText = extractTextFromContent(message.content);
+
+  if (contentText.trim().length > 0) {
+    return contentText;
+  }
+
+  return getTextFromParts(message);
+};
+
 interface ChatProps {
   initialMessages: Message[];
   storeMessageHistory: (messages: Message[]) => Promise<void>;
@@ -113,7 +170,11 @@ export const ChatImpl = memo(
     const { showChat } = useStore(chatStore);
     const [animationScope, animate] = useAnimate();
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
-    const [chatMode, setChatMode] = useState<'discuss' | 'build'>('build');
+    const [chatMode, setChatMode] = useState<'discuss' | 'build' | 'agent'>('build');
+    const [agentQueue, setAgentQueue] = useState<AgentQueueItem[]>([]);
+    const [isAgentQueuePaused, setIsAgentQueuePaused] = useState(false);
+    const [activeAgentQueueItem, setActiveAgentQueueItem] = useState<AgentQueueItem | null>(null);
+    const activeAgentQueueItemRef = useRef<AgentQueueItem | null>(null);
     const [selectedElement, setSelectedElement] = useState<ElementInfo | null>(null);
     const mcpSettings = useMCPStore((state) => state.settings);
 
@@ -152,10 +213,20 @@ export const ChatImpl = memo(
       },
       sendExtraMessageFields: true,
       onError: (e) => {
+        if (activeAgentQueueItemRef.current) {
+          activeAgentQueueItemRef.current = null;
+          setActiveAgentQueueItem(null);
+        }
+
         setFakeLoading(false);
         handleError(e, 'chat');
       },
       onFinish: (message, response) => {
+        if (activeAgentQueueItemRef.current) {
+          activeAgentQueueItemRef.current = null;
+          setActiveAgentQueueItem(null);
+        }
+
         const usage = response.usage;
         setData(undefined);
 
@@ -167,7 +238,7 @@ export const ChatImpl = memo(
             model,
             provider: provider.name,
             usage,
-            messageLength: message.content.length,
+            messageLength: getTextMessageContent(message).length,
           });
         }
 
@@ -222,6 +293,12 @@ export const ChatImpl = memo(
       stop();
       chatStore.setKey('aborted', true);
       workbenchStore.abortAllActions();
+
+      if (chatMode === 'agent' && activeAgentQueueItemRef.current) {
+        setIsAgentQueuePaused(true);
+        activeAgentQueueItemRef.current = null;
+        setActiveAgentQueueItem(null);
+      }
 
       logStore.logProvider('Chat response aborted', {
         component: 'Chat',
@@ -386,9 +463,45 @@ export const ChatImpl = memo(
       return attachments;
     };
 
-    const sendMessage = async (_event: React.UIEvent, messageInput?: string) => {
-      const messageContent = messageInput || input;
+    const createAgentQueueId = () => `agent-queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+    const clearComposerState = () => {
+      setInput('');
+      Cookies.remove(PROMPT_COOKIE_KEY);
+      setUploadedFiles([]);
+      setImageDataList([]);
+      resetEnhancer();
+      textareaRef.current?.blur();
+    };
+
+    const applySelectedElementContext = (messageContent: string) => {
+      if (!selectedElement) {
+        return messageContent;
+      }
+
+      const elementInfo = `<div class=\"__boltSelectedElement__\" data-element='${JSON.stringify(selectedElement)}'>${JSON.stringify(`${selectedElement.displayText}`)}</div>`;
+
+      return messageContent + elementInfo;
+    };
+
+    const createAgentQueueItem = (messageContent: string): AgentQueueItem => {
+      return {
+        id: createAgentQueueId(),
+        prompt: messageContent,
+        createdAt: Date.now(),
+        uploadedFiles: [...uploadedFiles],
+        imageDataList: [...imageDataList],
+      };
+    };
+
+    const dispatchMessage = async (
+      messageContent: string,
+      options?: {
+        queuedUploadedFiles?: File[];
+        queuedImageDataList?: string[];
+        clearComposer?: boolean;
+      },
+    ) => {
       if (!messageContent?.trim()) {
         return;
       }
@@ -398,14 +511,10 @@ export const ChatImpl = memo(
         return;
       }
 
-      let finalMessageContent = messageContent;
-
-      if (selectedElement) {
-        console.log('Selected Element:', selectedElement);
-
-        const elementInfo = `<div class=\"__boltSelectedElement__\" data-element='${JSON.stringify(selectedElement)}'>${JSON.stringify(`${selectedElement.displayText}`)}</div>`;
-        finalMessageContent = messageContent + elementInfo;
-      }
+      const effectiveUploadedFiles = options?.queuedUploadedFiles ?? uploadedFiles;
+      const effectiveImageDataList = options?.queuedImageDataList ?? imageDataList;
+      const shouldClearComposer = options?.clearComposer !== false;
+      const finalMessageContent = messageContent;
 
       runAnimation();
 
@@ -439,7 +548,7 @@ export const ChatImpl = memo(
                   id: `1-${new Date().getTime()}`,
                   role: 'user',
                   content: userMessageText,
-                  parts: createMessageParts(userMessageText, imageDataList),
+                  parts: createMessageParts(userMessageText, effectiveImageDataList),
                 },
                 {
                   id: `2-${new Date().getTime()}`,
@@ -455,51 +564,41 @@ export const ChatImpl = memo(
               ]);
 
               const reloadOptions =
-                uploadedFiles.length > 0
-                  ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
+                effectiveUploadedFiles.length > 0
+                  ? { experimental_attachments: await filesToAttachments(effectiveUploadedFiles) }
                   : undefined;
 
               reload(reloadOptions);
-              setInput('');
-              Cookies.remove(PROMPT_COOKIE_KEY);
-
-              setUploadedFiles([]);
-              setImageDataList([]);
-
-              resetEnhancer();
-
-              textareaRef.current?.blur();
               setFakeLoading(false);
+
+              if (shouldClearComposer) {
+                clearComposerState();
+              }
 
               return;
             }
           }
         }
 
-        // If autoSelectTemplate is disabled or template selection failed, proceed with normal message
         const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
-        const attachments = uploadedFiles.length > 0 ? await filesToAttachments(uploadedFiles) : undefined;
+        const attachments =
+          effectiveUploadedFiles.length > 0 ? await filesToAttachments(effectiveUploadedFiles) : undefined;
 
         setMessages([
           {
             id: `${new Date().getTime()}`,
             role: 'user',
             content: userMessageText,
-            parts: createMessageParts(userMessageText, imageDataList),
+            parts: createMessageParts(userMessageText, effectiveImageDataList),
             experimental_attachments: attachments,
           },
         ]);
         reload(attachments ? { experimental_attachments: attachments } : undefined);
         setFakeLoading(false);
-        setInput('');
-        Cookies.remove(PROMPT_COOKIE_KEY);
 
-        setUploadedFiles([]);
-        setImageDataList([]);
-
-        resetEnhancer();
-
-        textareaRef.current?.blur();
+        if (shouldClearComposer) {
+          clearComposerState();
+        }
 
         return;
       }
@@ -509,21 +608,21 @@ export const ChatImpl = memo(
       }
 
       const modifiedFiles = workbenchStore.getModifiedFiles();
-
       chatStore.setKey('aborted', false);
 
       if (modifiedFiles !== undefined) {
         const userUpdateArtifact = filesToArtifacts(modifiedFiles, `${Date.now()}`);
         const messageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userUpdateArtifact}${finalMessageContent}`;
-
         const attachmentOptions =
-          uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
+          effectiveUploadedFiles.length > 0
+            ? { experimental_attachments: await filesToAttachments(effectiveUploadedFiles) }
+            : undefined;
 
         append(
           {
             role: 'user',
             content: messageText,
-            parts: createMessageParts(messageText, imageDataList),
+            parts: createMessageParts(messageText, effectiveImageDataList),
           },
           attachmentOptions,
         );
@@ -531,29 +630,189 @@ export const ChatImpl = memo(
         workbenchStore.resetAllFileModifications();
       } else {
         const messageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
-
         const attachmentOptions =
-          uploadedFiles.length > 0 ? { experimental_attachments: await filesToAttachments(uploadedFiles) } : undefined;
+          effectiveUploadedFiles.length > 0
+            ? { experimental_attachments: await filesToAttachments(effectiveUploadedFiles) }
+            : undefined;
 
         append(
           {
             role: 'user',
             content: messageText,
-            parts: createMessageParts(messageText, imageDataList),
+            parts: createMessageParts(messageText, effectiveImageDataList),
           },
           attachmentOptions,
         );
       }
 
-      setInput('');
-      Cookies.remove(PROMPT_COOKIE_KEY);
+      if (shouldClearComposer) {
+        clearComposerState();
+      }
+    };
 
-      setUploadedFiles([]);
-      setImageDataList([]);
+    const sendMessage = async (_event: React.UIEvent, messageInput?: string) => {
+      const rawContent = messageInput || input;
 
-      resetEnhancer();
+      if (!rawContent?.trim()) {
+        return;
+      }
 
-      textareaRef.current?.blur();
+      const preparedContent = applySelectedElementContext(rawContent);
+
+      if (chatMode === 'agent') {
+        const queueItem = createAgentQueueItem(preparedContent);
+        setAgentQueue((previousQueue) => [...previousQueue, queueItem]);
+        runAnimation();
+
+        if (
+          isLoading ||
+          fakeLoading ||
+          activeAgentQueueItemRef.current ||
+          agentQueue.length > 0 ||
+          isAgentQueuePaused
+        ) {
+          toast.info('Task added to Agent queue');
+        }
+
+        clearComposerState();
+
+        return;
+      }
+
+      await dispatchMessage(preparedContent, { clearComposer: true });
+    };
+
+    useEffect(() => {
+      if (chatMode !== 'agent') {
+        return;
+      }
+
+      if (
+        isAgentQueuePaused ||
+        isLoading ||
+        fakeLoading ||
+        activeAgentQueueItemRef.current ||
+        agentQueue.length === 0
+      ) {
+        return;
+      }
+
+      const [nextQueueItem, ...remainingQueue] = agentQueue;
+
+      setAgentQueue(remainingQueue);
+      activeAgentQueueItemRef.current = nextQueueItem;
+      setActiveAgentQueueItem(nextQueueItem);
+
+      void dispatchMessage(nextQueueItem.prompt, {
+        queuedUploadedFiles: nextQueueItem.uploadedFiles,
+        queuedImageDataList: nextQueueItem.imageDataList,
+        clearComposer: false,
+      }).catch((error) => {
+        logger.error('Failed to dispatch queued Agent task', error);
+        activeAgentQueueItemRef.current = null;
+        setActiveAgentQueueItem(null);
+      });
+    }, [chatMode, isAgentQueuePaused, isLoading, fakeLoading, agentQueue]);
+
+    const toggleAgentQueuePause = () => {
+      setIsAgentQueuePaused((previous) => !previous);
+    };
+
+    const clearAgentQueue = () => {
+      setAgentQueue([]);
+    };
+
+    const moveAgentQueueItem = (id: string, direction: 'up' | 'down') => {
+      setAgentQueue((previousQueue) => {
+        const currentIndex = previousQueue.findIndex((item) => item.id === id);
+
+        if (currentIndex === -1) {
+          return previousQueue;
+        }
+
+        const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+
+        if (targetIndex < 0 || targetIndex >= previousQueue.length) {
+          return previousQueue;
+        }
+
+        const reorderedQueue = [...previousQueue];
+        const [selectedItem] = reorderedQueue.splice(currentIndex, 1);
+        reorderedQueue.splice(targetIndex, 0, selectedItem);
+
+        return reorderedQueue;
+      });
+    };
+
+    const editAgentQueueItem = (id: string, prompt: string) => {
+      const trimmedPrompt = prompt.trim();
+
+      if (!trimmedPrompt) {
+        return;
+      }
+
+      setAgentQueue((previousQueue) =>
+        previousQueue.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                prompt: trimmedPrompt,
+              }
+            : item,
+        ),
+      );
+    };
+
+    const copyAgentQueueItem = (id: string) => {
+      setAgentQueue((previousQueue) => {
+        const itemIndex = previousQueue.findIndex((item) => item.id === id);
+
+        if (itemIndex === -1) {
+          return previousQueue;
+        }
+
+        const sourceItem = previousQueue[itemIndex];
+        const copyItem: AgentQueueItem = {
+          ...sourceItem,
+          id: createAgentQueueId(),
+          createdAt: Date.now(),
+          uploadedFiles: [...sourceItem.uploadedFiles],
+          imageDataList: [...sourceItem.imageDataList],
+        };
+        const nextQueue = [...previousQueue];
+        nextQueue.splice(itemIndex + 1, 0, copyItem);
+
+        return nextQueue;
+      });
+    };
+
+    const removeAgentQueueItem = (id: string) => {
+      setAgentQueue((previousQueue) => previousQueue.filter((item) => item.id !== id));
+    };
+
+    const repeatAgentQueueItem = (id: string, count: number) => {
+      const safeCount = Math.min(50, Math.max(1, Math.floor(count || 1)));
+
+      setAgentQueue((previousQueue) => {
+        const itemIndex = previousQueue.findIndex((item) => item.id === id);
+
+        if (itemIndex === -1) {
+          return previousQueue;
+        }
+
+        const sourceItem = previousQueue[itemIndex];
+        const repeatedItems: AgentQueueItem[] = Array.from({ length: safeCount }).map(() => ({
+          ...sourceItem,
+          id: createAgentQueueId(),
+          createdAt: Date.now(),
+          uploadedFiles: [...sourceItem.uploadedFiles],
+          imageDataList: [...sourceItem.imageDataList],
+        }));
+        const nextQueue = [...previousQueue];
+        nextQueue.splice(itemIndex + 1, 0, ...repeatedItems);
+
+        return nextQueue;
+      });
     };
 
     /**
@@ -635,14 +894,18 @@ export const ChatImpl = memo(
         description={description}
         importChat={importChat}
         exportChat={exportChat}
-        messages={messages.map((message, i) => {
+        messages={messages.map((message) => {
           if (message.role === 'user') {
             return message;
           }
 
+          const parsedContent = parsedMessages[message.id];
+          const fallbackContent = getTextMessageContent(message);
+          const hasRenderableParsedContent = typeof parsedContent === 'string' && parsedContent.trim().length > 0;
+
           return {
             ...message,
-            content: parsedMessages[i] || '',
+            content: hasRenderableParsedContent ? parsedContent : fallbackContent,
           };
         })}
         enhancePrompt={() => {
@@ -679,6 +942,16 @@ export const ChatImpl = memo(
         setSelectedElement={setSelectedElement}
         addToolResult={addToolResult}
         onWebSearchResult={handleWebSearchResult}
+        agentQueue={agentQueue}
+        activeAgentQueueItem={activeAgentQueueItem}
+        isAgentQueuePaused={isAgentQueuePaused}
+        onToggleAgentQueuePause={toggleAgentQueuePause}
+        onClearAgentQueue={clearAgentQueue}
+        onMoveAgentQueueItem={moveAgentQueueItem}
+        onEditAgentQueueItem={editAgentQueueItem}
+        onCopyAgentQueueItem={copyAgentQueueItem}
+        onRemoveAgentQueueItem={removeAgentQueueItem}
+        onRepeatAgentQueueItem={repeatAgentQueueItem}
       />
     );
   },

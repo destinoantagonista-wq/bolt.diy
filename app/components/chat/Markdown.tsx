@@ -17,8 +17,8 @@ interface MarkdownProps {
   html?: boolean;
   limitedMarkdown?: boolean;
   append?: (message: Message) => void;
-  chatMode?: 'discuss' | 'build';
-  setChatMode?: (mode: 'discuss' | 'build') => void;
+  chatMode?: 'discuss' | 'build' | 'agent';
+  setChatMode?: (mode: 'discuss' | 'build' | 'agent') => void;
   model?: string;
   provider?: ProviderInfo;
 }
@@ -161,7 +161,7 @@ export const Markdown = memo(
                     });
                     console.log('Message appended:', message);
                   } else if (type === 'implement' && append && setChatMode) {
-                    setChatMode('build');
+                    setChatMode('agent');
                     append({
                       id: `quick-action-implement-${Date.now()}`,
                       content: [

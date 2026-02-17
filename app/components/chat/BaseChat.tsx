@@ -24,7 +24,7 @@ import DeployChatAlert from '~/components/deploy/DeployAlert';
 import ChatAlert from './ChatAlert';
 import type { ModelInfo } from '~/lib/modules/llm/types';
 import ProgressCompilation from './ProgressCompilation';
-import type { ProgressAnnotation } from '~/types/context';
+import type { AgentEventAnnotation, ProgressAnnotation } from '~/types/context';
 import { SupabaseChatAlert } from '~/components/chat/SupabaseAlert';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 import { useStore } from '@nanostores/react';
@@ -33,6 +33,10 @@ import { ChatBox } from './ChatBox';
 import type { DesignScheme } from '~/types/design-scheme';
 import type { ElementInfo } from '~/components/workbench/Inspector';
 import LlmErrorAlert from './LLMApiAlert';
+import { AgentQueuePanel } from './AgentQueuePanel';
+import type { AgentQueueItem } from '~/types/agent-queue';
+import { AgentRealtimeFeed } from './AgentRealtimeFeed';
+import { isDokployRuntime } from '~/lib/runtime-provider';
 
 const TEXTAREA_MIN_HEIGHT = 76;
 
@@ -73,8 +77,8 @@ interface BaseChatProps {
   llmErrorAlert?: LlmErrorAlertType;
   clearLlmErrorAlert?: () => void;
   data?: JSONValue[] | undefined;
-  chatMode?: 'discuss' | 'build';
-  setChatMode?: (mode: 'discuss' | 'build') => void;
+  chatMode?: 'discuss' | 'build' | 'agent';
+  setChatMode?: (mode: 'discuss' | 'build' | 'agent') => void;
   append?: (message: Message) => void;
   designScheme?: DesignScheme;
   setDesignScheme?: (scheme: DesignScheme) => void;
@@ -82,6 +86,16 @@ interface BaseChatProps {
   setSelectedElement?: (element: ElementInfo | null) => void;
   addToolResult?: ({ toolCallId, result }: { toolCallId: string; result: any }) => void;
   onWebSearchResult?: (result: string) => void;
+  agentQueue?: AgentQueueItem[];
+  activeAgentQueueItem?: AgentQueueItem | null;
+  isAgentQueuePaused?: boolean;
+  onToggleAgentQueuePause?: () => void;
+  onClearAgentQueue?: () => void;
+  onMoveAgentQueueItem?: (id: string, direction: 'up' | 'down') => void;
+  onEditAgentQueueItem?: (id: string, prompt: string) => void;
+  onCopyAgentQueueItem?: (id: string) => void;
+  onRemoveAgentQueueItem?: (id: string) => void;
+  onRepeatAgentQueueItem?: (id: string, count: number) => void;
 }
 
 export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
@@ -132,6 +146,16 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
         throw new Error('addToolResult not implemented');
       },
       onWebSearchResult,
+      agentQueue = [],
+      activeAgentQueueItem = null,
+      isAgentQueuePaused = false,
+      onToggleAgentQueuePause,
+      onClearAgentQueue,
+      onMoveAgentQueueItem,
+      onEditAgentQueueItem,
+      onCopyAgentQueueItem,
+      onRemoveAgentQueueItem,
+      onRepeatAgentQueueItem,
     },
     ref,
   ) => {
@@ -144,6 +168,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     const [transcript, setTranscript] = useState('');
     const [isModelLoading, setIsModelLoading] = useState<string | undefined>('all');
     const [progressAnnotations, setProgressAnnotations] = useState<ProgressAnnotation[]>([]);
+    const [agentEvents, setAgentEvents] = useState<AgentEventAnnotation[]>([]);
     const expoUrl = useStore(expoUrlAtom);
     const [qrModalOpen, setQrModalOpen] = useState(false);
 
@@ -154,13 +179,25 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     }, [expoUrl]);
 
     useEffect(() => {
-      if (data) {
-        const progressList = data.filter(
-          (x) => typeof x === 'object' && (x as any).type === 'progress',
-        ) as ProgressAnnotation[];
-        setProgressAnnotations(progressList);
+      if (!data) {
+        if (!isStreaming) {
+          setProgressAnnotations([]);
+          setAgentEvents([]);
+        }
+
+        return;
       }
-    }, [data]);
+
+      const progressList = data.filter(
+        (x) => typeof x === 'object' && (x as any).type === 'progress',
+      ) as ProgressAnnotation[];
+      const eventList = data.filter(
+        (x) => typeof x === 'object' && (x as any).type === 'agent-event',
+      ) as AgentEventAnnotation[];
+
+      setProgressAnnotations(progressList);
+      setAgentEvents(eventList);
+    }, [data, isStreaming]);
     useEffect(() => {
       console.log(transcript);
     }, [transcript]);
@@ -202,32 +239,43 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
     }, []);
 
     useEffect(() => {
-      if (typeof window !== 'undefined') {
-        let parsedApiKeys: Record<string, string> | undefined = {};
-
-        try {
-          parsedApiKeys = getApiKeysFromCookies();
-          setApiKeys(parsedApiKeys);
-        } catch (error) {
-          console.error('Error loading API keys from cookies:', error);
-          Cookies.remove('apiKeys');
-        }
-
-        setIsModelLoading('all');
-        fetch('/api/models')
-          .then((response) => response.json())
-          .then((data) => {
-            const typedData = data as { modelList: ModelInfo[] };
-            setModelList(typedData.modelList);
-          })
-          .catch((error) => {
-            console.error('Error fetching model list:', error);
-          })
-          .finally(() => {
-            setIsModelLoading(undefined);
-          });
+      if (typeof window === 'undefined') {
+        return undefined;
       }
-    }, [providerList, provider]);
+
+      const abortController = new AbortController();
+      let parsedApiKeys: Record<string, string> | undefined = {};
+
+      try {
+        parsedApiKeys = getApiKeysFromCookies();
+        setApiKeys(parsedApiKeys);
+      } catch (error) {
+        console.error('Error loading API keys from cookies:', error);
+        Cookies.remove('apiKeys');
+      }
+
+      setIsModelLoading('all');
+      fetch('/api/models', { signal: abortController.signal })
+        .then((response) => response.json())
+        .then((data) => {
+          const typedData = data as { modelList: ModelInfo[] };
+          setModelList(typedData.modelList);
+        })
+        .catch((error) => {
+          if (error?.name === 'AbortError') {
+            return;
+          }
+
+          console.error('Error fetching model list:', error);
+        })
+        .finally(() => {
+          setIsModelLoading(undefined);
+        });
+
+      return () => {
+        abortController.abort();
+      };
+    }, [providerList]);
 
     const onApiKeysChange = async (providerName: string, apiKey: string) => {
       const newApiKeys = { ...apiKeys, [providerName]: apiKey };
@@ -425,7 +473,21 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
                   )}
                   {llmErrorAlert && <LlmErrorAlert alert={llmErrorAlert} clearAlert={() => clearLlmErrorAlert?.()} />}
                 </div>
+                {chatMode === 'agent' && <AgentRealtimeFeed events={agentEvents} isStreaming={isStreaming} />}
                 {progressAnnotations && <ProgressCompilation data={progressAnnotations} />}
+                <AgentQueuePanel
+                  chatMode={chatMode}
+                  queue={agentQueue}
+                  activeItem={activeAgentQueueItem}
+                  paused={isAgentQueuePaused}
+                  onTogglePause={() => onToggleAgentQueuePause?.()}
+                  onClear={() => onClearAgentQueue?.()}
+                  onMove={(id, direction) => onMoveAgentQueueItem?.(id, direction)}
+                  onEdit={(id, prompt) => onEditAgentQueueItem?.(id, prompt)}
+                  onCopy={(id) => onCopyAgentQueueItem?.(id)}
+                  onRemove={(id) => onRemoveAgentQueueItem?.(id)}
+                  onRepeat={(id, count) => onRepeatAgentQueueItem?.(id, count)}
+                />
                 <ChatBox
                   isModelSettingsCollapsed={isModelSettingsCollapsed}
                   setIsModelSettingsCollapsed={setIsModelSettingsCollapsed}
@@ -475,7 +537,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
               {!chatStarted && (
                 <div className="flex justify-center gap-2">
                   {ImportButtons(importChat)}
-                  <GitCloneButton importChat={importChat} />
+                  {!isDokployRuntime && <GitCloneButton importChat={importChat} />}
                 </div>
               )}
               <div className="flex flex-col gap-5">

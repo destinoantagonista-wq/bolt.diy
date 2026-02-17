@@ -15,7 +15,7 @@ import SetupGuide from './SetupGuide';
 import StatusDashboard from './StatusDashboard';
 import ProviderCard from './ProviderCard';
 import ModelCard from './ModelCard';
-import { OLLAMA_API_URL } from './types';
+import { OLLAMA_API_URL, type ProviderName } from './types';
 import type { OllamaModel, LMStudioModel } from './types';
 import { Cpu, Server, BookOpen, Activity, PackageOpen, Monitor, Loader2, RotateCw, ExternalLink } from 'lucide-react';
 
@@ -36,7 +36,7 @@ export default function LocalProvidersTab() {
   // Memoized filtered providers to prevent unnecessary re-renders
   const filteredProviders = useMemo(() => {
     return Object.entries(providers || {})
-      .filter(([key]) => [...LOCAL_PROVIDERS, 'OpenAILike'].includes(key))
+      .filter(([key]) => LOCAL_PROVIDERS.includes(key))
       .map(([key, value]) => {
         const provider = value as IProviderConfig;
         const envKey = providerBaseUrlEnvKeys[key]?.baseUrlKey;
@@ -50,6 +50,8 @@ export default function LocalProvidersTab() {
             defaultBaseUrl = 'http://127.0.0.1:11434';
           } else if (key === 'LMStudio') {
             defaultBaseUrl = 'http://127.0.0.1:1234';
+          } else if (key === 'CLIProxyAPI') {
+            defaultBaseUrl = 'http://127.0.0.1:8317/v1';
           }
         }
 
@@ -67,9 +69,9 @@ export default function LocalProvidersTab() {
         } as IProviderConfig;
       })
       .sort((a, b) => {
-        // Custom sort: Ollama first, then LMStudio, then OpenAILike
-        const order = { Ollama: 0, LMStudio: 1, OpenAILike: 2 };
-        return (order[a.name as keyof typeof order] || 3) - (order[b.name as keyof typeof order] || 3);
+        // Custom sort: Ollama, LMStudio, OpenAILike, CLIProxyAPI
+        const order = { Ollama: 0, LMStudio: 1, OpenAILike: 2, CLIProxyAPI: 3 };
+        return (order[a.name as keyof typeof order] ?? 4) - (order[b.name as keyof typeof order] ?? 4);
       });
   }, [providers]);
 
@@ -84,10 +86,10 @@ export default function LocalProvidersTab() {
 
       if (provider.settings.enabled && baseUrl) {
         console.log(`[LocalProvidersTab] Starting monitoring for ${provider.name} at ${baseUrl}`);
-        startMonitoring(provider.name as 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl);
+        startMonitoring(provider.name as ProviderName, baseUrl);
       } else if (!provider.settings.enabled && baseUrl) {
         console.log(`[LocalProvidersTab] Stopping monitoring for ${provider.name} at ${baseUrl}`);
-        stopMonitoring(provider.name as 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl);
+        stopMonitoring(provider.name as ProviderName, baseUrl);
       }
     });
   }, [filteredProviders, startMonitoring, stopMonitoring]);

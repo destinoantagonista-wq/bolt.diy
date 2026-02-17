@@ -1,6 +1,12 @@
 import { type ActionFunctionArgs, json } from '@remix-run/cloudflare';
 import crypto from 'crypto';
 import type { NetlifySiteInfo } from '~/types/netlify';
+import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
+
+const isDokployRuntime = (context: unknown) => {
+  const env = (context as any)?.cloudflare?.env as Record<string, unknown> | undefined;
+  return getRuntimeServerConfig(env).runtimeProvider === 'dokploy';
+};
 
 interface DeployRequestBody {
   siteId?: string;
@@ -25,7 +31,11 @@ async function readNetlifyError(response: Response) {
   }
 }
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request, context }: ActionFunctionArgs) {
+  if (isDokployRuntime(context)) {
+    return json({ error: 'External deploy is unavailable in Dokploy runtime V1' }, { status: 403 });
+  }
+
   try {
     const { siteId, files, token, chatId } = (await request.json()) as DeployRequestBody & { token: string };
 

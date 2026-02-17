@@ -1,5 +1,6 @@
 import { json } from '@remix-run/cloudflare';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
 
 // Allowed headers to forward to the target server
 const ALLOW_HEADERS = [
@@ -43,11 +44,25 @@ const EXPOSE_HEADERS = [
 ];
 
 // Handle all HTTP methods
-export async function action({ request, params }: ActionFunctionArgs) {
+export async function action({ request, params, context }: ActionFunctionArgs) {
+  const env = context?.cloudflare?.env as unknown as Record<string, unknown> | undefined;
+  const config = getRuntimeServerConfig(env);
+
+  if (config.runtimeProvider === 'dokploy') {
+    return json({ error: 'Git proxy is unavailable in Dokploy runtime V1' }, { status: 403 });
+  }
+
   return handleProxyRequest(request, params['*']);
 }
 
-export async function loader({ request, params }: LoaderFunctionArgs) {
+export async function loader({ request, params, context }: LoaderFunctionArgs) {
+  const env = context?.cloudflare?.env as unknown as Record<string, unknown> | undefined;
+  const config = getRuntimeServerConfig(env);
+
+  if (config.runtimeProvider === 'dokploy') {
+    return json({ error: 'Git proxy is unavailable in Dokploy runtime V1' }, { status: 403 });
+  }
+
   return handleProxyRequest(request, params['*']);
 }
 

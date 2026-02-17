@@ -7,26 +7,32 @@ import { cubicEasingFn } from '~/utils/easings';
 export default function ProgressCompilation({ data }: { data?: ProgressAnnotation[] }) {
   const [progressList, setProgressList] = React.useState<ProgressAnnotation[]>([]);
   const [expanded, setExpanded] = useState(false);
+
   React.useEffect(() => {
     if (!data || data.length == 0) {
       setProgressList([]);
       return;
     }
 
-    const progressMap = new Map<string, ProgressAnnotation>();
-    data.forEach((x) => {
-      const existingProgress = progressMap.get(x.label);
+    const sorted = [...data].sort((a, b) => a.order - b.order);
+    const condensed: ProgressAnnotation[] = [];
 
-      if (existingProgress && existingProgress.status === 'complete') {
-        return;
+    for (const item of sorted) {
+      const previous = condensed[condensed.length - 1];
+
+      if (
+        previous &&
+        previous.label === item.label &&
+        previous.status === item.status &&
+        previous.message === item.message
+      ) {
+        continue;
       }
 
-      progressMap.set(x.label, x);
-    });
+      condensed.push(item);
+    }
 
-    const newData = Array.from(progressMap.values());
-    newData.sort((a, b) => a.order - b.order);
-    setProgressList(newData);
+    setProgressList(condensed.slice(-12));
   }, [data]);
 
   if (progressList.length === 0) {
@@ -86,6 +92,20 @@ export default function ProgressCompilation({ data }: { data?: ProgressAnnotatio
 }
 
 const ProgressItem = ({ progress }: { progress: ProgressAnnotation }) => {
+  const iconClass =
+    progress.status === 'in-progress'
+      ? 'i-svg-spinners:90-ring-with-bg'
+      : progress.status === 'complete'
+        ? 'i-ph:check'
+        : 'i-ph:x';
+
+  const iconColor =
+    progress.status === 'in-progress'
+      ? 'text-bolt-elements-textPrimary'
+      : progress.status === 'complete'
+        ? 'text-bolt-elements-item-contentAccent'
+        : 'text-red-500';
+
   return (
     <motion.div
       className={classNames('flex text-sm gap-3')}
@@ -95,13 +115,7 @@ const ProgressItem = ({ progress }: { progress: ProgressAnnotation }) => {
       transition={{ duration: 0.15 }}
     >
       <div className="flex items-center gap-1.5 ">
-        <div>
-          {progress.status === 'in-progress' ? (
-            <div className="i-svg-spinners:90-ring-with-bg"></div>
-          ) : progress.status === 'complete' ? (
-            <div className="i-ph:check"></div>
-          ) : null}
-        </div>
+        <div className={classNames(iconClass, iconColor)} />
         {/* {x.label} */}
       </div>
       {progress.message}

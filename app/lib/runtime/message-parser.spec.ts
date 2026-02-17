@@ -157,6 +157,71 @@ describe('StreamingMessageParser', () => {
       runTest(input, expected);
     });
   });
+
+  describe('finalization of incomplete streams', () => {
+    it('should finalize an unfinished file action and artifact when stream ends', () => {
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn(),
+      };
+
+      const parser = new StreamingMessageParser({
+        callbacks,
+      });
+
+      const input =
+        'Before <boltArtifact title="Some title" id="artifact_1"><boltAction type="file" filePath="index.html"><html><body>Hi</body></html>';
+
+      parser.parse('message_incomplete', input);
+
+      expect(callbacks.onArtifactOpen).toHaveBeenCalledTimes(1);
+      expect(callbacks.onActionOpen).toHaveBeenCalledTimes(1);
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(0);
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(0);
+
+      parser.finalize('message_incomplete', input);
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+      expect(callbacks.onActionClose).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: expect.objectContaining({
+            type: 'file',
+            filePath: 'index.html',
+            content: '<html><body>Hi</body></html>\n',
+          }),
+        }),
+      );
+    });
+
+    it('should not emit duplicate close callbacks when artifact is already complete', () => {
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn(),
+      };
+
+      const parser = new StreamingMessageParser({
+        callbacks,
+      });
+
+      const input =
+        'Before <boltArtifact title="Some title" id="artifact_1"><boltAction type="file" filePath="index.html">hello</boltAction></boltArtifact> After';
+
+      parser.parse('message_complete', input);
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+
+      parser.finalize('message_complete', input);
+
+      expect(callbacks.onActionClose).toHaveBeenCalledTimes(1);
+      expect(callbacks.onArtifactClose).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe('EnhancedStreamingMessageParser', () => {

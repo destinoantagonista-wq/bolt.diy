@@ -7,13 +7,15 @@ export interface StreamRecoveryOptions {
   timeout?: number;
   onTimeout?: () => void;
   onRecovery?: () => void;
+  onRetry?: (attempt: number, maxRetries: number) => void;
+  onExhausted?: () => void;
 }
 
 export class StreamRecoveryManager {
   private _retryCount = 0;
   private _timeoutHandle: NodeJS.Timeout | null = null;
   private _lastActivity: number = Date.now();
-  private _isActive = true;
+  private _isActive = false;
 
   constructor(private _options: StreamRecoveryOptions = {}) {
     this._options = {
@@ -24,6 +26,9 @@ export class StreamRecoveryManager {
   }
 
   startMonitoring() {
+    this._isActive = true;
+    this._retryCount = 0;
+    this._lastActivity = Date.now();
     this._resetTimeout();
   }
 
@@ -50,15 +55,26 @@ export class StreamRecoveryManager {
   }
 
   private _handleTimeout() {
-    if (this._retryCount >= (this._options.maxRetries || 3)) {
+    const maxRetries = this._options.maxRetries || 3;
+
+    if (this._retryCount >= maxRetries) {
       logger.error('Max retries reached for stream recovery');
+
+      if (this._options.onExhausted) {
+        this._options.onExhausted();
+      }
+
       this.stop();
 
       return;
     }
 
     this._retryCount++;
-    logger.info(`Attempting stream recovery (attempt ${this._retryCount})`);
+    logger.info(`Attempting stream recovery (attempt ${this._retryCount}/${maxRetries})`);
+
+    if (this._options.onRetry) {
+      this._options.onRetry(this._retryCount, maxRetries);
+    }
 
     if (this._options.onTimeout) {
       this._options.onTimeout();

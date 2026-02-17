@@ -1,6 +1,14 @@
-import { type LoaderFunction } from '@remix-run/cloudflare';
+import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
 
-export const loader: LoaderFunction = async ({ request }) => {
+export const loader = async ({ request, context }: LoaderFunctionArgs) => {
+  const env = (context as any)?.cloudflare?.env as Record<string, unknown> | undefined;
+  const config = getRuntimeServerConfig(env);
+
+  if (config.runtimeProvider === 'dokploy') {
+    throw new Response('Not Found', { status: 404 });
+  }
+
   const url = new URL(request.url);
   const editorOrigin = url.searchParams.get('editorOrigin') || 'https://stackblitz.com';
   console.log('editorOrigin', editorOrigin);

@@ -2,13 +2,17 @@ import { atom, map, type MapStore, type ReadableAtom, type WritableAtom } from '
 import type { EditorDocument, ScrollPosition } from '~/components/editor/codemirror/CodeMirrorEditor';
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
+import { isDokployRuntime, runtimeProvider } from '~/lib/runtime-provider';
 import { webcontainer } from '~/lib/webcontainer';
 import type { ITerminal } from '~/types/terminal';
+import { WORK_DIR } from '~/utils/constants';
 import { unreachable } from '~/utils/unreachable';
 import { EditorStore } from './editor';
 import { FilesStore, type FileMap } from './files';
 import { PreviewsStore } from './previews';
 import { TerminalStore } from './terminal';
+import { RemoteFilesStore } from './files.remote';
+import { RemotePreviewsStore } from './previews.remote';
 import JSZip from 'jszip';
 import fileSaver from 'file-saver';
 import { Octokit, type RestEndpointMethodTypes } from '@octokit/rest';
@@ -35,11 +39,76 @@ type Artifacts = MapStore<Record<string, ArtifactState>>;
 
 export type WorkbenchViewType = 'code' | 'diff' | 'preview';
 
+type FilesStoreLike = Pick<
+  FilesStore,
+  | 'files'
+  | 'filesCount'
+  | 'getFile'
+  | 'getFileOrFolder'
+  | 'getFileModifications'
+  | 'getModifiedFiles'
+  | 'resetFileModifications'
+  | 'saveFile'
+  | 'createFile'
+  | 'createFolder'
+  | 'deleteFile'
+  | 'deleteFolder'
+  | 'lockFile'
+  | 'lockFolder'
+  | 'unlockFile'
+  | 'unlockFolder'
+  | 'isFileLocked'
+  | 'isFolderLocked'
+> & {
+  ensureFileContent?: (filePath: string) => Promise<void>;
+};
+
+type PreviewsStoreLike = {
+  previews: PreviewsStore['previews'];
+  refreshAllPreviews: () => void;
+};
+
+type TerminalStoreLike = Pick<
+  TerminalStore,
+  | 'showTerminal'
+  | 'boltTerminal'
+  | 'toggleTerminal'
+  | 'attachBoltTerminal'
+  | 'attachTerminal'
+  | 'detachTerminal'
+  | 'onTerminalResize'
+>;
+
+class DisabledTerminalStore implements TerminalStoreLike {
+  showTerminal: WritableAtom<boolean> = atom(false);
+  boltTerminal = { ready: async () => undefined } as any;
+  toggleTerminal() {
+    return undefined;
+  }
+  async attachBoltTerminal() {
+    return undefined;
+  }
+  async attachTerminal() {
+    return undefined;
+  }
+  async detachTerminal() {
+    return undefined;
+  }
+  onTerminalResize() {
+    return undefined;
+  }
+}
+
 export class WorkbenchStore {
-  #previewsStore = new PreviewsStore(webcontainer);
-  #filesStore = new FilesStore(webcontainer);
+  #isDokployRuntime = isDokployRuntime;
+  #previewsStore: PreviewsStoreLike = this.#isDokployRuntime
+    ? new RemotePreviewsStore()
+    : new PreviewsStore(webcontainer);
+  #filesStore: FilesStoreLike = this.#isDokployRuntime ? new RemoteFilesStore() : new FilesStore(webcontainer);
   #editorStore = new EditorStore(this.#filesStore);
-  #terminalStore = new TerminalStore(webcontainer);
+  #terminalStore: TerminalStoreLike = this.#isDokployRuntime
+    ? new DisabledTerminalStore()
+    : new TerminalStore(webcontainer);
 
   #reloadedMessages = new Set<string>();
 
@@ -58,6 +127,10 @@ export class WorkbenchStore {
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
   constructor() {
+    if (this.#isDokployRuntime) {
+      this.#terminalStore.showTerminal.set(false);
+    }
+
     if (import.meta.hot) {
       import.meta.hot.data.artifacts = this.artifacts;
       import.meta.hot.data.unsavedFiles = this.unsavedFiles;
@@ -80,11 +153,22 @@ export class WorkbenchStore {
   }
 
   addToExecutionQueue(callback: () => Promise<void>) {
-    this.#globalExecutionQueue = this.#globalExecutionQueue.then(() => callback());
+    this.#globalExecutionQueue = this.#globalExecutionQueue
+      .catch((error) => {
+        console.error('Recovered execution queue after previous failure:', error);
+      })
+      .then(() => callback())
+      .catch((error) => {
+        console.error('Execution queue callback failed:', error);
+      });
   }
 
   get previews() {
     return this.#previewsStore.previews;
+  }
+
+  get runtimeProvider() {
+    return runtimeProvider;
   }
 
   get files() {
@@ -155,6 +239,10 @@ export class WorkbenchStore {
     this.#terminalStore.onTerminalResize(cols, rows);
   }
 
+  refreshAllPreviews() {
+    this.#previewsStore.refreshAllPreviews();
+  }
+
   setDocuments(files: FileMap) {
     this.#editorStore.setDocuments(files);
 
@@ -220,6 +308,14 @@ export class WorkbenchStore {
 
   setSelectedFile(filePath: string | undefined) {
     this.#editorStore.setSelectedFile(filePath);
+
+    if (!filePath) {
+      return;
+    }
+
+    this.#filesStore.ensureFileContent?.(filePath).catch((error) => {
+      console.error('Failed to load file content', error);
+    });
   }
 
   async saveFile(filePath: string) {
@@ -505,6 +601,9 @@ export class WorkbenchStore {
 
           this.deployAlert.set(alert);
         },
+        {
+          runtimeProvider: this.#isDokployRuntime ? 'dokploy' : 'webcontainer',
+        },
       ),
     });
   }
@@ -562,8 +661,9 @@ export class WorkbenchStore {
     }
 
     if (data.action.type === 'file') {
-      const wc = await webcontainer;
-      const fullPath = path.join(wc.workdir, data.action.filePath);
+      const fullPath = this.#isDokployRuntime
+        ? path.join(WORK_DIR, data.action.filePath)
+        : path.join((await webcontainer).workdir, data.action.filePath);
 
       /*
        * For scoped locks, we would need to implement diff checking here
@@ -582,7 +682,17 @@ export class WorkbenchStore {
       const doc = this.#editorStore.documents.get()[fullPath];
 
       if (!doc) {
-        await artifact.runner.runAction(data, isStreaming);
+        if (this.#isDokployRuntime) {
+          const existing = this.#filesStore.getFile(fullPath);
+
+          if (!existing) {
+            await this.#filesStore.createFile(fullPath, data.action.content || '');
+          }
+
+          this.#editorStore.setDocuments(this.files.get());
+        } else {
+          await artifact.runner.runAction(data, isStreaming);
+        }
       }
 
       this.#editorStore.updateFile(fullPath, data.action.content);

@@ -31,8 +31,10 @@ class SimpleEventEmitter {
   }
 }
 
+export type LocalProviderName = 'Ollama' | 'LMStudio' | 'OpenAILike' | 'CLIProxyAPI';
+
 export interface ModelHealthStatus {
-  provider: 'Ollama' | 'LMStudio' | 'OpenAILike';
+  provider: LocalProviderName;
   baseUrl: string;
   status: 'healthy' | 'unhealthy' | 'checking' | 'unknown';
   lastChecked: Date;
@@ -63,7 +65,7 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
   /**
    * Start monitoring a local provider
    */
-  startMonitoring(provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string, checkInterval?: number): void {
+  startMonitoring(provider: LocalProviderName, baseUrl: string, checkInterval?: number): void {
     const key = this._getProviderKey(provider, baseUrl);
 
     // Stop existing monitoring if any
@@ -91,7 +93,7 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
   /**
    * Stop monitoring a local provider
    */
-  stopMonitoring(provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string): void {
+  stopMonitoring(provider: LocalProviderName, baseUrl: string): void {
     const key = this._getProviderKey(provider, baseUrl);
 
     const interval = this._checkIntervals.get(key);
@@ -107,7 +109,7 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
   /**
    * Get current health status for a provider
    */
-  getHealthStatus(provider: 'Ollama' | 'LMStudio' | 'OpenAILike', baseUrl: string): ModelHealthStatus | undefined {
+  getHealthStatus(provider: LocalProviderName, baseUrl: string): ModelHealthStatus | undefined {
     const key = this._getProviderKey(provider, baseUrl);
     return this._healthStatuses.get(key);
   }
@@ -122,10 +124,7 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
   /**
    * Perform a manual health check
    */
-  async performHealthCheck(
-    provider: 'Ollama' | 'LMStudio' | 'OpenAILike',
-    baseUrl: string,
-  ): Promise<HealthCheckResult> {
+  async performHealthCheck(provider: LocalProviderName, baseUrl: string): Promise<HealthCheckResult> {
     const key = this._getProviderKey(provider, baseUrl);
     const startTime = Date.now();
 
@@ -191,10 +190,7 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
   /**
    * Check health of a specific provider
    */
-  private async _checkProviderHealth(
-    provider: 'Ollama' | 'LMStudio' | 'OpenAILike',
-    baseUrl: string,
-  ): Promise<HealthCheckResult> {
+  private async _checkProviderHealth(provider: LocalProviderName, baseUrl: string): Promise<HealthCheckResult> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this._healthCheckTimeout);
 
@@ -206,6 +202,8 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
           return await this._checkLMStudioHealth(baseUrl, controller.signal);
         case 'OpenAILike':
           return await this._checkOpenAILikeHealth(baseUrl, controller.signal);
+        case 'CLIProxyAPI':
+          return await this._checkCLIProxyAPIHealth(baseUrl, controller.signal);
         default:
           throw new Error(`Unsupported provider: ${provider}`);
       }
@@ -330,9 +328,23 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
    * Check OpenAI-like provider health
    */
   private async _checkOpenAILikeHealth(baseUrl: string, signal: AbortSignal): Promise<HealthCheckResult> {
+    return this._checkOpenAICompatibleHealth(baseUrl, signal);
+  }
+
+  /**
+   * Check CLIProxyAPI health (OpenAI-compatible endpoint)
+   */
+  private async _checkCLIProxyAPIHealth(baseUrl: string, signal: AbortSignal): Promise<HealthCheckResult> {
+    return this._checkOpenAICompatibleHealth(baseUrl, signal);
+  }
+
+  private async _checkOpenAICompatibleHealth(baseUrl: string, signal: AbortSignal): Promise<HealthCheckResult> {
     try {
-      // Normalize URL to include /v1 if needed
-      const normalizedUrl = baseUrl.includes('/v1') ? baseUrl : `${baseUrl}/v1`;
+      const normalizedUrl = this._normalizeOpenAICompatibleBaseUrl(baseUrl);
+
+      if (!normalizedUrl) {
+        throw new Error('Invalid base URL');
+      }
 
       const response = await fetch(`${normalizedUrl}/models`, {
         method: 'GET',
@@ -361,6 +373,33 @@ export class LocalModelHealthMonitor extends SimpleEventEmitter {
         error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
+  }
+
+  private _normalizeOpenAICompatibleBaseUrl(baseUrl: string): string {
+    let normalized = String(baseUrl || '').trim();
+
+    if (!normalized) {
+      return '';
+    }
+
+    if (!/^https?:\/\//i.test(normalized)) {
+      normalized = `http://${normalized}`;
+    }
+
+    normalized = normalized
+      .replace(/\/+$/g, '')
+      .replace(/\/v0\/management\/?$/i, '')
+      .replace(/\/v1\/models\/?$/i, '')
+      .replace(/\/v1\/chat\/completions\/?$/i, '')
+      .replace(/\/chat\/completions\/?$/i, '')
+      .replace(/\/models\/?$/i, '')
+      .replace(/\/+$/g, '');
+
+    if (normalized.endsWith('/v1')) {
+      return normalized;
+    }
+
+    return `${normalized}/v1`;
   }
 
   /**
