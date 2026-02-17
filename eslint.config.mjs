@@ -54,4 +54,50 @@ export default [
       ],
     },
   },
+  {
+    files: [...tsFileExtensions, ...jsFileExtensions, '**/*.tsx'],
+    ignores: [
+      'functions/*',
+      'electron/**/*',
+      'app/components/**/*.webcontainer.*',
+      'app/lib/hooks/useGit.webcontainer.ts',
+      'app/lib/legacy/webcontainer/**',
+      'app/routes/webcontainer.connect.$id.tsx',
+      'app/routes/webcontainer.preview.$id.tsx',
+      'app/lib/webcontainer/**',
+      'app/lib/stores/workbench.ts',
+      'app/lib/stores/files.ts',
+      'app/lib/stores/previews.ts',
+      'app/lib/stores/terminal.ts',
+      'app/lib/runtime/action-runner.ts',
+      'app/utils/shell.ts',
+    ],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@webcontainer/api',
+              message: 'WebContainer imports are only allowed in legacy modules.',
+            },
+            {
+              name: '~/lib/webcontainer',
+              message: 'WebContainer imports are only allowed in legacy modules.',
+            },
+          ],
+          patterns: [
+            {
+              group: ['../'],
+              message: "Relative imports are not allowed. Please use '~/' instead.",
+            },
+            {
+              group: ['~/lib/webcontainer/*'],
+              message: 'WebContainer imports are only allowed in legacy modules.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 ];

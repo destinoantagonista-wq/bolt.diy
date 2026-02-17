@@ -7,7 +7,8 @@ import { ScreenshotSelector } from './ScreenshotSelector';
 import { expoUrlAtom } from '~/lib/stores/qrCodeStore';
 import { ExpoQrModal } from '~/components/workbench/ExpoQrModal';
 import type { ElementInfo } from './Inspector';
-import { isDokployRuntime } from '~/lib/runtime-provider';
+import { runtimeFeatures } from '~/lib/runtime/features';
+import type { PreviewOperationalState } from '~/lib/stores/previews';
 
 type ResizeSide = 'left' | 'right' | null;
 
@@ -62,9 +63,11 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const hasSelectedPreview = useRef(false);
   const previews = useStore(workbenchStore.previews);
+  const previewStatus = useStore(workbenchStore.previewStatus);
   const activePreview = previews[activePreviewIndex];
   const [displayPath, setDisplayPath] = useState('/');
   const [iframeUrl, setIframeUrl] = useState<string | undefined>();
+  const [iframeKey, setIframeKey] = useState(0);
   const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [isInspectorMode, setIsInspectorMode] = useState(false);
   const [isDeviceModeOn, setIsDeviceModeOn] = useState(false);
@@ -90,7 +93,26 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   const [showDeviceFrameInPreview, setShowDeviceFrameInPreview] = useState(false);
   const expoUrl = useStore(expoUrlAtom);
   const [isExpoQrModalOpen, setIsExpoQrModalOpen] = useState(false);
-  const supportsExpoFeatures = !isDokployRuntime;
+  const supportsExpoFeatures = runtimeFeatures.expoQr;
+  const previousOperationalState = useRef<PreviewOperationalState>(previewStatus.state);
+  const statusLabelByState: Record<PreviewOperationalState, string> = {
+    provisioning: 'Provisionando ambiente remoto',
+    deploying: 'Deploy em andamento',
+    ready: 'Preview pronto',
+    reconnecting: 'Reconectando ao runtime',
+    error: 'Preview indisponivel',
+  };
+  const statusClassByState: Record<PreviewOperationalState, string> = {
+    provisioning: 'bg-blue-500/15 text-blue-500',
+    deploying: 'bg-amber-500/15 text-amber-500',
+    ready: 'bg-emerald-500/15 text-emerald-500',
+    reconnecting: 'bg-orange-500/15 text-orange-500',
+    error: 'bg-red-500/15 text-red-500',
+  };
+  const statusLabel = statusLabelByState[previewStatus.state];
+  const statusDetail = previewStatus.message;
+  const showStatusOverlay = previewStatus.state !== 'ready';
+  const showRetryButton = previewStatus.state === 'error' || previewStatus.state === 'reconnecting';
 
   useEffect(() => {
     if (!activePreview) {
@@ -104,6 +126,21 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
     setIframeUrl(baseUrl);
     setDisplayPath('/');
   }, [activePreview]);
+
+  useEffect(() => {
+    const previousState = previousOperationalState.current;
+    const currentState = previewStatus.state;
+
+    if (
+      (previousState === 'deploying' || previousState === 'reconnecting') &&
+      currentState === 'ready' &&
+      activePreview?.baseUrl
+    ) {
+      setIframeKey((value) => value + 1);
+    }
+
+    previousOperationalState.current = currentState;
+  }, [previewStatus.state, activePreview?.baseUrl]);
 
   const findMinPortIndex = useCallback(
     (minIndex: number, preview: { port: number }, index: number, array: { port: number }[]) => {
@@ -120,9 +157,15 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
   }, [previews, findMinPortIndex]);
 
   const reloadPreview = () => {
-    if (iframeRef.current) {
-      iframeRef.current.src = iframeRef.current.src;
+    setIframeKey((value) => value + 1);
+
+    if (activePreview?.baseUrl) {
+      setIframeUrl((current) => current || activePreview.baseUrl);
     }
+  };
+
+  const retryPreviewConnection = () => {
+    workbenchStore.refreshAllPreviews();
   };
 
   const toggleFullscreen = async () => {
@@ -698,6 +741,10 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
           />
         </div>
 
+        <div className={`rounded-full px-2 py-1 text-xs font-medium ${statusClassByState[previewStatus.state]}`}>
+          {statusLabel}
+        </div>
+
         <div className="flex items-center gap-2">
           <IconButton
             icon="i-ph:devices"
@@ -953,6 +1000,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                     />
 
                     <iframe
+                      key={`preview-frame-${iframeKey}`}
                       ref={iframeRef}
                       title="preview"
                       style={{
@@ -970,6 +1018,7 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                 </div>
               ) : (
                 <iframe
+                  key={`preview-frame-${iframeKey}`}
                   ref={iframeRef}
                   title="preview"
                   className="border-none w-full h-full bg-bolt-elements-background-depth-1"
@@ -983,6 +1032,24 @@ export const Preview = memo(({ setSelectedElement }: PreviewProps) => {
                 setIsSelectionMode={setIsSelectionMode}
                 containerRef={iframeRef}
               />
+              {showStatusOverlay && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20">
+                  <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-bolt-elements-borderColor bg-bolt-elements-background-depth-2 px-4 py-3 text-center">
+                    <div className="text-sm font-medium text-bolt-elements-textPrimary">{statusLabel}</div>
+                    {statusDetail && statusDetail !== statusLabel && (
+                      <div className="max-w-xs text-xs text-bolt-elements-textSecondary">{statusDetail}</div>
+                    )}
+                    {showRetryButton && (
+                      <button
+                        className="rounded-md border border-bolt-elements-borderColor bg-bolt-elements-background-depth-3 px-3 py-1 text-xs text-bolt-elements-textPrimary hover:bg-bolt-elements-background-depth-4"
+                        onClick={retryPreviewConnection}
+                      >
+                        Tentar novamente
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <div className="flex w-full h-full justify-center items-center bg-bolt-elements-background-depth-1 text-bolt-elements-textPrimary">

@@ -27,7 +27,7 @@ import { ExportChatButton } from '~/components/chat/chatExportAndImport/ExportCh
 import { useChatHistory } from '~/lib/persistence';
 import { streamingState } from '~/lib/stores/streaming';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { isDokployRuntime } from '~/lib/runtime-provider';
+import { runtimeFeatures } from '~/lib/runtime/features';
 
 interface WorkspaceProps {
   chatStarted?: boolean;
@@ -307,7 +307,7 @@ export const Workbench = memo(
     const streaming = useStore(streamingState);
     const { exportChat } = useChatHistory();
     const [isSyncing, setIsSyncing] = useState(false);
-    const terminalSupported = !isDokployRuntime;
+    const terminalSupported = runtimeFeatures.terminal;
 
     const setSelectedView = (view: WorkbenchViewType) => {
       workbenchStore.currentView.set(view);

@@ -12,6 +12,22 @@ export interface PreviewInfo {
   port: number;
   ready: boolean;
   baseUrl: string;
+  operationalState?: PreviewOperationalState;
+  statusMessage?: string;
+  retryCount?: number;
+  maxRetries?: number;
+  lastTransitionAt?: number;
+}
+
+export type PreviewOperationalState = 'provisioning' | 'deploying' | 'ready' | 'error' | 'reconnecting';
+
+export interface PreviewStatusSnapshot {
+  state: PreviewOperationalState;
+  message: string;
+  retryCount: number;
+  maxRetries: number;
+  queuedSince?: number;
+  lastTransitionAt: number;
 }
 
 // Create a broadcast channel for preview updates
@@ -28,6 +44,13 @@ export class PreviewsStore {
   #storageChannel?: BroadcastChannel;
 
   previews = atom<PreviewInfo[]>([]);
+  status = atom<PreviewStatusSnapshot>({
+    state: 'provisioning',
+    message: 'Provisionando ambiente remoto',
+    retryCount: 0,
+    maxRetries: 1,
+    lastTransitionAt: Date.now(),
+  });
 
   constructor(webcontainerPromise: Promise<WebContainer>) {
     this.#webcontainer = webcontainerPromise;
@@ -173,6 +196,7 @@ export class PreviewsStore {
     webcontainer.on('server-ready', (port, url) => {
       console.log('[Preview] Server ready on port:', port, url);
       this.broadcastUpdate(url);
+      this.#setStatus('ready', 'Preview pronto');
 
       // Initial storage sync when preview is ready
       this._broadcastStorageSync();
@@ -185,6 +209,7 @@ export class PreviewsStore {
       if (type === 'close' && previewInfo) {
         this.#availablePreviews.delete(port);
         this.previews.set(this.previews.get().filter((preview) => preview.port !== port));
+        this.#setStatus(this.previews.get().length > 0 ? 'ready' : 'provisioning');
 
         return;
       }
@@ -203,7 +228,10 @@ export class PreviewsStore {
       this.previews.set([...previews]);
 
       if (type === 'open') {
+        this.#setStatus('ready', 'Preview pronto');
         this.broadcastUpdate(url);
+      } else {
+        this.#setStatus('deploying', 'Deploy em andamento');
       }
     });
   }
@@ -271,10 +299,12 @@ export class PreviewsStore {
       if (preview) {
         preview.ready = false;
         this.previews.set([...previews]);
+        this.#setStatus('deploying', 'Deploy em andamento');
 
         requestAnimationFrame(() => {
           preview.ready = true;
           this.previews.set([...previews]);
+          this.#setStatus('ready', 'Preview pronto');
         });
       }
 
@@ -287,6 +317,10 @@ export class PreviewsStore {
   refreshAllPreviews() {
     const previews = this.previews.get();
 
+    if (previews.length > 0) {
+      this.#setStatus('deploying', 'Deploy em andamento');
+    }
+
     for (const preview of previews) {
       const previewId = this.getPreviewId(preview.baseUrl);
 
@@ -294,6 +328,34 @@ export class PreviewsStore {
         this.broadcastFileChange(previewId);
       }
     }
+  }
+
+  #setStatus(state: PreviewOperationalState, message?: string) {
+    const current = this.status.get();
+
+    if (current.state === state && current.message === message) {
+      return;
+    }
+
+    const nextMessage =
+      message ||
+      (state === 'provisioning'
+        ? 'Provisionando ambiente remoto'
+        : state === 'deploying'
+          ? 'Deploy em andamento'
+          : state === 'reconnecting'
+            ? 'Reconectando ao runtime'
+            : state === 'error'
+              ? 'Preview indisponivel'
+              : 'Preview pronto');
+    const now = Date.now();
+
+    this.status.set({
+      ...current,
+      state,
+      message: nextMessage,
+      lastTransitionAt: now,
+    });
   }
 }
 

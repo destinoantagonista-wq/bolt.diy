@@ -1,7 +1,9 @@
 import type { DesignScheme } from '~/types/design-scheme';
+import type { RuntimeProvider } from '~/lib/.server/runtime/types';
 import { WORK_DIR } from '~/utils/constants';
 import { allowedHTMLElements } from '~/utils/markdown';
 import { stripIndents } from '~/utils/stripIndent';
+import { getDokployFineTunedPrompt } from './new-prompt.dokploy';
 
 export const getFineTunedPrompt = (
   cwd: string = WORK_DIR,
@@ -11,7 +13,13 @@ export const getFineTunedPrompt = (
     credentials?: { anonKey?: string; supabaseUrl?: string };
   },
   designScheme?: DesignScheme,
-) => `
+  runtimeProvider: RuntimeProvider = 'webcontainer',
+) => {
+  if (runtimeProvider === 'dokploy') {
+    return getDokployFineTunedPrompt(cwd, supabase, designScheme);
+  }
+
+  return `
 You are Bolt, an expert AI assistant and exceptional senior software developer with vast knowledge across multiple programming languages, frameworks, and best practices, created by StackBlitz.
 
 The year is 2025.
@@ -298,6 +306,7 @@ npm run dev
 The development server is now running. Ready for your next instructions.</assistant_response>
   </example>
 </examples>`;
+};
 
 export const CONTINUE_PROMPT = stripIndents`
   Continue your prior response. IMPORTANT: Immediately begin from where you left off without any interruptions.

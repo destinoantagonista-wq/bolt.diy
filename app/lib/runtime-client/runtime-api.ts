@@ -12,6 +12,8 @@ export interface RuntimeSession {
   previewUrl: string;
   status: RuntimeSessionStatus;
   expiresAt: string;
+  serverId?: string;
+  rolloutCohort?: 'stable' | 'canary';
 }
 
 export interface RuntimeFileEntry {
@@ -52,6 +54,7 @@ export interface RuntimeSessionGetResponse {
 export interface RuntimeHeartbeatResponse {
   expiresAt: string;
   status: RuntimeSessionStatus;
+  runtimeToken?: string;
 }
 
 class RuntimeApiError extends Error {
@@ -122,20 +125,30 @@ const parseJson = async (response: Response) => {
   }
 };
 
+const resolveRuntimeRequestUrl = (requestPath: string) => {
+  if (typeof window === 'undefined') {
+    throw new RuntimeApiError('Runtime API is only available in browser context', 500);
+  }
+
+  return new URL(requestPath, window.location.origin);
+};
+
 const request = async <T>({
   path,
   method = 'GET',
   runtimeToken,
   query,
   body,
+  signal,
 }: {
   path: string;
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   runtimeToken?: string;
   query?: Record<string, string | undefined>;
   body?: unknown;
+  signal?: AbortSignal;
 }): Promise<T> => {
-  const url = new URL(path, window.location.origin);
+  const url = resolveRuntimeRequestUrl(path);
 
   if (query) {
     for (const [key, value] of Object.entries(query)) {
@@ -159,6 +172,7 @@ const request = async <T>({
     method,
     headers,
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    ...(signal ? { signal } : {}),
   });
   const payload = await parseJson(response);
 
@@ -215,7 +229,7 @@ export const runtimeApi = {
 
     return navigator.sendBeacon('/api/runtime/session?intent=delete', payload);
   },
-  listFiles(runtimeToken: string, runtimePath?: string) {
+  listFiles(runtimeToken: string, runtimePath?: string, signal?: AbortSignal) {
     return request<{ entries: RuntimeFileEntry[] }>({
       path: '/api/runtime/files/list',
       method: 'GET',
@@ -223,9 +237,10 @@ export const runtimeApi = {
       query: {
         path: runtimePath,
       },
+      signal,
     });
   },
-  readFile(runtimeToken: string, runtimePath: string) {
+  readFile(runtimeToken: string, runtimePath: string, signal?: AbortSignal) {
     return request<{ file: RuntimeFile }>({
       path: '/api/runtime/files/read',
       method: 'GET',
@@ -233,14 +248,20 @@ export const runtimeApi = {
       query: {
         path: runtimePath,
       },
+      signal,
     });
   },
-  writeFile(runtimeToken: string, input: { path: string; content: string; encoding?: 'utf8' | 'base64' }) {
+  writeFile(
+    runtimeToken: string,
+    input: { path: string; content: string; encoding?: 'utf8' | 'base64' },
+    signal?: AbortSignal,
+  ) {
     return request<{ ok: true }>({
       path: '/api/runtime/files/write',
       method: 'PUT',
       runtimeToken,
       body: input,
+      signal,
     });
   },
   mkdir(runtimeToken: string, runtimePath: string) {
@@ -264,7 +285,7 @@ export const runtimeApi = {
       },
     });
   },
-  search(runtimeToken: string, query: string, runtimePath?: string) {
+  search(runtimeToken: string, query: string, runtimePath?: string, signal?: AbortSignal) {
     return request<{ entries: RuntimeFileEntry[] }>({
       path: '/api/runtime/files/search',
       method: 'GET',
@@ -273,6 +294,7 @@ export const runtimeApi = {
         query,
         path: runtimePath,
       },
+      signal,
     });
   },
   redeploy(runtimeToken: string, reason?: string) {

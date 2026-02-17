@@ -12,6 +12,7 @@ import { discussPrompt } from '~/lib/common/prompts/discuss-prompt';
 import { agentModePrompt } from '~/lib/common/prompts/agent-mode-prompt';
 import type { DesignScheme } from '~/types/design-scheme';
 import { getRuntimeServerConfig } from '~/lib/.server/runtime/config';
+import type { RuntimeProvider } from '~/lib/.server/runtime/types';
 
 export type Messages = Message[];
 
@@ -76,6 +77,45 @@ function sanitizeText(text: unknown): string {
   sanitized = sanitized.replace(/<boltAction type="file" filePath="package-lock\.json">[\s\S]*?<\/boltAction>/g, '');
 
   return sanitized.trim();
+}
+
+interface RuntimeAwareSystemPromptOptions {
+  runtimeProvider: RuntimeProvider;
+  promptId?: string;
+  designScheme?: DesignScheme;
+  supabaseConnection?: StreamingOptions['supabaseConnection'];
+}
+
+export function buildRuntimeAwareSystemPrompts(options: RuntimeAwareSystemPromptOptions): {
+  buildSystemPrompt: string;
+  discussSystemPrompt: string;
+  agentSystemPrompt: string;
+} {
+  const { runtimeProvider, promptId, designScheme, supabaseConnection } = options;
+  const supabasePromptState = {
+    isConnected: supabaseConnection?.isConnected || false,
+    hasSelectedProject: supabaseConnection?.hasSelectedProject || false,
+    credentials: supabaseConnection?.credentials || undefined,
+  };
+
+  const buildSystemPrompt =
+    PromptLibrary.getPropmtFromLibrary(promptId || 'default', {
+      cwd: WORK_DIR,
+      allowedHtmlElements: allowedHTMLElements,
+      modificationTagName: MODIFICATIONS_TAG_NAME,
+      runtimeProvider,
+      designScheme,
+      supabase: supabasePromptState,
+    }) ?? getSystemPrompt(WORK_DIR, supabasePromptState, designScheme, runtimeProvider);
+
+  const discussSystemPrompt = discussPrompt(runtimeProvider);
+  const agentSystemPrompt = agentModePrompt(buildSystemPrompt);
+
+  return {
+    buildSystemPrompt,
+    discussSystemPrompt,
+    agentSystemPrompt,
+  };
 }
 
 export async function streamText(props: {
@@ -179,43 +219,15 @@ export async function streamText(props: {
   );
 
   const isAgentMode = chatMode === 'agent';
-
-  let buildSystemPrompt =
-    PromptLibrary.getPropmtFromLibrary(promptId || 'default', {
-      cwd: WORK_DIR,
-      allowedHtmlElements: allowedHTMLElements,
-      modificationTagName: MODIFICATIONS_TAG_NAME,
-      designScheme,
-      supabase: {
-        isConnected: options?.supabaseConnection?.isConnected || false,
-        hasSelectedProject: options?.supabaseConnection?.hasSelectedProject || false,
-        credentials: options?.supabaseConnection?.credentials || undefined,
-      },
-    }) ?? getSystemPrompt();
-
-  let discussSystemPrompt = discussPrompt();
-  let agentSystemPrompt = agentModePrompt(buildSystemPrompt);
   const runtimeProvider = getRuntimeServerConfig(
     serverEnv as unknown as Record<string, unknown> | undefined,
   ).runtimeProvider;
-
-  if (runtimeProvider === 'dokploy') {
-    const dokployRuntimeInstructions = `
-<dokploy_v1_runtime_constraints>
-  - This workspace runs on a remote Dokploy runtime.
-  - V1 supports file editing and remote preview only.
-  - NEVER emit shell/start/build actions.
-  - Focus on <boltAction type="file"> actions.
-  - Do not ask the user to run terminal commands manually.
-  - Git clone/import, external deploy providers, and Expo QR flows are unavailable in V1.
-  - Search capabilities are limited to file name/path, not full-text grep.
-</dokploy_v1_runtime_constraints>
-`;
-
-    buildSystemPrompt = `${buildSystemPrompt}\n${dokployRuntimeInstructions}`;
-    agentSystemPrompt = `${agentSystemPrompt}\n${dokployRuntimeInstructions}`;
-    discussSystemPrompt = `${discussSystemPrompt}\n\nFor this project runtime, assume Dokploy V1 constraints: no shell actions, file edits + preview only.`;
-  }
+  let { buildSystemPrompt, discussSystemPrompt, agentSystemPrompt } = buildRuntimeAwareSystemPrompts({
+    runtimeProvider,
+    promptId,
+    designScheme,
+    supabaseConnection: options?.supabaseConnection,
+  });
 
   const shouldInjectContext = !!contextFiles && !!contextOptimization && (chatMode === 'build' || isAgentMode);
 

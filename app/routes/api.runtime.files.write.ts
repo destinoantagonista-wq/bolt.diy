@@ -1,40 +1,38 @@
 import type { ActionFunctionArgs } from '@remix-run/cloudflare';
+import { filesWriteBodySchema } from '~/lib/.server/runtime/route-schemas';
 import { DokployClient } from '~/lib/.server/runtime/dokploy-client';
 import { isRedeployTriggerPath, toRuntimePath, toVirtualPath } from '~/lib/.server/runtime/path-mapper';
 import { mapRuntimeRouteError, withRuntimeClaims } from '~/lib/.server/runtime/session-orchestrator';
 import {
+  assertMethod,
   getRuntimeConfigFromContext,
   getRuntimeRequestId,
-  getRuntimeTokenFromRequest,
   jsonResponse,
+  parseJsonBody,
+  requireRuntimeToken,
+  runtimeErrorResponse,
 } from '~/lib/.server/runtime/route-utils';
 
 export const action = async (args: ActionFunctionArgs) => {
   try {
+    assertMethod(args.request, ['PUT', 'POST']);
+
     const config = getRuntimeConfigFromContext(args);
 
     if (config.runtimeProvider !== 'dokploy') {
-      return jsonResponse({ error: 'Runtime provider is not dokploy' }, 400);
+      return runtimeErrorResponse('Runtime provider is not dokploy', 400, 'BAD_REQUEST');
     }
 
-    if (!['PUT', 'POST'].includes(args.request.method)) {
-      return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
-
-    const runtimeToken = await getRuntimeTokenFromRequest(args.request);
-
-    if (!runtimeToken) {
-      return jsonResponse({ error: 'Missing runtime token' }, 401);
-    }
-
-    const body = (await args.request.json()) as any;
-    const rawPath = typeof body?.path === 'string' ? body.path : '';
-    const path = toRuntimePath(rawPath);
-    const content = typeof body?.content === 'string' ? body.content : '';
-    const encoding = body?.encoding === 'base64' ? 'base64' : 'utf8';
+    const body = await parseJsonBody(args.request, filesWriteBodySchema);
+    const runtimeToken = requireRuntimeToken(args.request, {
+      bodyRuntimeToken: body.runtimeToken,
+    });
+    const path = toRuntimePath(body.path);
+    const content = body.content;
+    const encoding = body.encoding === 'base64' ? 'base64' : 'utf8';
 
     if (!path) {
-      return jsonResponse({ error: 'Missing path' }, 400);
+      return runtimeErrorResponse('Missing path', 400, 'BAD_REQUEST');
     }
 
     const claims = await withRuntimeClaims({ config, runtimeToken });

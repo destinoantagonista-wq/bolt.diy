@@ -11,6 +11,7 @@ import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('RuntimeSessionStore');
 const DRAFT_CHAT_STORAGE_KEY = 'bolt_runtime_draft_chat_id';
+const isBrowser = typeof window !== 'undefined';
 
 const parsePositiveInt = (value: string | undefined, fallback: number) => {
   const parsed = Number.parseInt(value || '', 10);
@@ -23,6 +24,14 @@ const parsePositiveInt = (value: string | undefined, fallback: number) => {
 };
 
 const HEARTBEAT_SECONDS = parsePositiveInt(import.meta.env.VITE_RUNTIME_HEARTBEAT_SEC, 30);
+
+const createDraftChatId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `draft-${crypto.randomUUID().slice(0, 12)}`;
+  }
+
+  return `draft-${Math.random().toString(36).slice(2, 14)}`;
+};
 
 export type RuntimeConnectionState = 'idle' | 'creating' | 'ready' | 'error';
 
@@ -69,7 +78,7 @@ export class RuntimeSessionStore {
     templateId?: string;
     force?: boolean;
   }): Promise<RuntimeSession | undefined> {
-    if (!isDokployRuntime) {
+    if (!isDokployRuntime || !isBrowser) {
       return undefined;
     }
 
@@ -148,7 +157,7 @@ export class RuntimeSessionStore {
   }
 
   async refreshSession() {
-    if (!isDokployRuntime) {
+    if (!isDokployRuntime || !isBrowser) {
       return undefined;
     }
 
@@ -188,7 +197,7 @@ export class RuntimeSessionStore {
   }
 
   async heartbeat() {
-    if (!isDokployRuntime) {
+    if (!isDokployRuntime || !isBrowser) {
       return undefined;
     }
 
@@ -199,6 +208,10 @@ export class RuntimeSessionStore {
     }
 
     const result = await runtimeApi.heartbeat(current.runtimeToken);
+    const nextRuntimeToken =
+      typeof result.runtimeToken === 'string' && result.runtimeToken.length > 0
+        ? result.runtimeToken
+        : current.runtimeToken;
     const updatedSession = current.session
       ? {
           ...current.session,
@@ -209,6 +222,7 @@ export class RuntimeSessionStore {
     this.sessionState.set({
       ...current,
       state: 'ready',
+      runtimeToken: nextRuntimeToken,
       session: updatedSession,
       sessionStatus: result.status,
       error: undefined,
@@ -219,6 +233,11 @@ export class RuntimeSessionStore {
 
   async teardownSession() {
     if (!isDokployRuntime) {
+      return;
+    }
+
+    if (!isBrowser) {
+      this.#reset();
       return;
     }
 
@@ -263,13 +282,13 @@ export class RuntimeSessionStore {
         return stored;
       }
 
-      const nextDraft = `draft-${crypto.randomUUID().slice(0, 12)}`;
+      const nextDraft = createDraftChatId();
       sessionStorage.setItem(DRAFT_CHAT_STORAGE_KEY, nextDraft);
 
       return nextDraft;
     }
 
-    return `draft-${crypto.randomUUID().slice(0, 12)}`;
+    return createDraftChatId();
   }
 
   #bindLifecycleEvents() {

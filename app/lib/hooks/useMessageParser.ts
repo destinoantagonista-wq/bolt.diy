@@ -1,54 +1,57 @@
 import type { Message } from 'ai';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { EnhancedStreamingMessageParser } from '~/lib/runtime/enhanced-message-parser';
+import { runtimeProvider } from '~/lib/runtime-provider';
 import { workbenchStore } from '~/lib/stores/workbench';
 import { createScopedLogger } from '~/utils/logger';
 
 const logger = createScopedLogger('useMessageParser');
 
-const messageParser = new EnhancedStreamingMessageParser({
-  callbacks: {
-    onArtifactOpen: (data) => {
-      logger.trace('onArtifactOpen', data);
+const createMessageParser = (provider: 'webcontainer' | 'dokploy') =>
+  new EnhancedStreamingMessageParser({
+    runtimeProvider: provider,
+    callbacks: {
+      onArtifactOpen: (data) => {
+        logger.trace('onArtifactOpen', data);
 
-      workbenchStore.showWorkbench.set(true);
-      workbenchStore.addArtifact(data);
-    },
-    onArtifactClose: (data) => {
-      logger.trace('onArtifactClose');
+        workbenchStore.showWorkbench.set(true);
+        workbenchStore.addArtifact(data);
+      },
+      onArtifactClose: (data) => {
+        logger.trace('onArtifactClose');
 
-      workbenchStore.updateArtifact(data, { closed: true });
-    },
-    onActionOpen: (data) => {
-      logger.trace('onActionOpen', data.action);
+        workbenchStore.updateArtifact(data, { closed: true });
+      },
+      onActionOpen: (data) => {
+        logger.trace('onActionOpen', data.action);
 
-      /*
-       * File actions are streamed, so we add them immediately to show progress
-       * Shell actions are complete when created by enhanced parser, so we wait for close
-       */
-      if (data.action.type === 'file') {
-        workbenchStore.addAction(data);
-      }
-    },
-    onActionClose: (data) => {
-      logger.trace('onActionClose', data.action);
+        /*
+         * File actions are streamed, so we add them immediately to show progress
+         * Shell actions are complete when created by enhanced parser, so we wait for close
+         */
+        if (data.action.type === 'file') {
+          workbenchStore.addAction(data);
+        }
+      },
+      onActionClose: (data) => {
+        logger.trace('onActionClose', data.action);
 
-      /*
-       * Add non-file actions (shell, build, start, etc.) when they close
-       * Enhanced parser creates complete shell actions, so they're ready to execute
-       */
-      if (data.action.type !== 'file') {
-        workbenchStore.addAction(data);
-      }
+        /*
+         * Add non-file actions (shell, build, start, etc.) when they close
+         * Enhanced parser creates complete shell actions, so they're ready to execute
+         */
+        if (data.action.type !== 'file') {
+          workbenchStore.addAction(data);
+        }
 
-      workbenchStore.runAction(data);
+        workbenchStore.runAction(data);
+      },
+      onActionStream: (data) => {
+        logger.trace('onActionStream', data.action);
+        workbenchStore.runAction(data, true);
+      },
     },
-    onActionStream: (data) => {
-      logger.trace('onActionStream', data.action);
-      workbenchStore.runAction(data, true);
-    },
-  },
-});
+  });
 
 const extractTextFromContent = (content: unknown) => {
   if (typeof content === 'string') {
@@ -108,48 +111,61 @@ const extractTextContent = (message: Message) => {
 
 export function useMessageParser() {
   const [parsedMessages, setParsedMessages] = useState<Record<string, string>>({});
+  const messageParser = useMemo(() => createMessageParser(runtimeProvider), [runtimeProvider]);
 
-  const parseMessages = useCallback((messages: Message[], isLoading: boolean) => {
-    let reset = false;
+  useEffect(() => {
+    messageParser.reset();
+    setParsedMessages({});
 
-    if (import.meta.env.DEV && !isLoading) {
-      reset = true;
+    return () => {
       messageParser.reset();
-    }
+    };
+  }, [messageParser]);
 
-    setParsedMessages((previousParsed) => {
-      const nextParsed = reset ? {} : { ...previousParsed };
-      const activeAssistantMessageIds = new Set<string>();
+  const parseMessages = useCallback(
+    (messages: Message[], isLoading: boolean) => {
+      let reset = false;
 
-      for (const message of messages) {
-        if (message.role !== 'assistant') {
-          continue;
-        }
-
-        const messageId = message.id;
-        activeAssistantMessageIds.add(messageId);
-
-        const messageContent = extractTextContent(message);
-        const newParsedContent = messageParser.parse(messageId, messageContent);
-
-        if (!isLoading) {
-          messageParser.finalize(messageId, messageContent);
-        }
-
-        if (newParsedContent.length > 0) {
-          nextParsed[messageId] = !reset ? (nextParsed[messageId] || '') + newParsedContent : newParsedContent;
-        }
+      if (import.meta.env.DEV && !isLoading) {
+        reset = true;
+        messageParser.reset();
       }
 
-      for (const parsedMessageId of Object.keys(nextParsed)) {
-        if (!activeAssistantMessageIds.has(parsedMessageId)) {
-          delete nextParsed[parsedMessageId];
-        }
-      }
+      setParsedMessages((previousParsed) => {
+        const nextParsed = reset ? {} : { ...previousParsed };
+        const activeAssistantMessageIds = new Set<string>();
 
-      return nextParsed;
-    });
-  }, []);
+        for (const message of messages) {
+          if (message.role !== 'assistant') {
+            continue;
+          }
+
+          const messageId = message.id;
+          activeAssistantMessageIds.add(messageId);
+
+          const messageContent = extractTextContent(message);
+          const newParsedContent = messageParser.parse(messageId, messageContent);
+
+          if (!isLoading) {
+            messageParser.finalize(messageId, messageContent);
+          }
+
+          if (newParsedContent.length > 0) {
+            nextParsed[messageId] = !reset ? (nextParsed[messageId] || '') + newParsedContent : newParsedContent;
+          }
+        }
+
+        for (const parsedMessageId of Object.keys(nextParsed)) {
+          if (!activeAssistantMessageIds.has(parsedMessageId)) {
+            delete nextParsed[parsedMessageId];
+          }
+        }
+
+        return nextParsed;
+      });
+    },
+    [messageParser],
+  );
 
   return { parsedMessages, parseMessages };
 }

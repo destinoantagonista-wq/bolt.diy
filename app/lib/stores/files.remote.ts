@@ -18,7 +18,8 @@ import {
   removeLockedFolder,
 } from '~/lib/persistence/lockedFiles';
 import { getCurrentChatId } from '~/utils/fileLocks';
-import { runtimeApi, toRuntimePath } from '~/lib/runtime-client/runtime-api';
+import { runtimeApi, toRuntimePath, type RuntimeFileEntry } from '~/lib/runtime-client/runtime-api';
+import { RemoteWriteQueue } from './remote-write-queue';
 import { runtimeSessionStore } from './runtimeSession';
 import type { File, FileMap } from './files';
 
@@ -26,13 +27,58 @@ const logger = createScopedLogger('RemoteFilesStore');
 const utf8TextDecoder = new TextDecoder('utf8', { fatal: true });
 
 const LOCK_REFRESH_INTERVAL_MS = 30_000;
-const REMOTE_REFRESH_INTERVAL_MS = 20_000;
+export const REMOTE_REFRESH_VISIBLE_INTERVAL_MS = 20_000;
+export const REMOTE_REFRESH_HIDDEN_BACKOFF_MS = [20_000, 40_000, 80_000, 160_000, 300_000] as const;
+export const DIRECTORY_CACHE_TTL_MS = 2_000;
+
+export interface DirectoryCacheEntry {
+  runtimeToken: string;
+  runtimePath: string;
+  expiresAt: number;
+  entries: RuntimeFileEntry[];
+}
+
+export interface RefreshBackoffState {
+  hiddenAttempt: number;
+  lastDelayMs: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface RemoteFilesStoreOptions {
+  autoInit?: boolean;
+  enableDomObservers?: boolean;
+  enableRefreshScheduler?: boolean;
+  writeDebounceMs?: number;
+  directoryCacheTtlMs?: number;
+}
+
+const defaultOptions: Required<RemoteFilesStoreOptions> = {
+  autoInit: true,
+  enableDomObservers: true,
+  enableRefreshScheduler: true,
+  writeDebounceMs: 200,
+  directoryCacheTtlMs: DIRECTORY_CACHE_TTL_MS,
+};
+
+export const getHiddenRefreshDelayMs = (hiddenAttempt: number) => {
+  const normalizedIndex = Math.max(0, Math.min(hiddenAttempt, REMOTE_REFRESH_HIDDEN_BACKOFF_MS.length - 1));
+  return REMOTE_REFRESH_HIDDEN_BACKOFF_MS[normalizedIndex];
+};
 
 export class RemoteFilesStore {
   #size = 0;
   #modifiedFiles: Map<string, string> = import.meta.hot?.data.remoteModifiedFiles ?? new Map();
   #loadedFileContent = import.meta.hot?.data.remoteLoadedFileContent ?? new Set<string>();
   #lastRuntimeToken = import.meta.hot?.data.remoteRuntimeToken as string | undefined;
+  #options: Required<RemoteFilesStoreOptions>;
+  #writeQueue: RemoteWriteQueue;
+  #refreshInFlight?: Promise<void>;
+  #directoryCache = new Map<string, DirectoryCacheEntry>();
+  #directoryListInFlight = new Map<string, Promise<RuntimeFileEntry[]>>();
+  #refreshBackoff: RefreshBackoffState = {
+    hiddenAttempt: 0,
+    lastDelayMs: REMOTE_REFRESH_VISIBLE_INTERVAL_MS,
+  };
 
   files: MapStore<FileMap> = import.meta.hot?.data.remoteFiles ?? map({});
 
@@ -40,7 +86,24 @@ export class RemoteFilesStore {
     return this.#size;
   }
 
-  constructor() {
+  constructor(options: RemoteFilesStoreOptions = {}) {
+    this.#options = {
+      ...defaultOptions,
+      ...options,
+    };
+    this.#writeQueue = new RemoteWriteQueue({
+      debounceMs: this.#options.writeDebounceMs,
+      write: async (job) => {
+        const runtimeToken = await this.#ensureRuntimeToken();
+        await runtimeApi.writeFile(runtimeToken, {
+          path: job.path,
+          content: job.content,
+          encoding: job.encoding,
+        });
+        this.#invalidateDirectoryCache(runtimeToken);
+      },
+    });
+
     if (import.meta.hot) {
       import.meta.hot.data.remoteFiles = this.files;
       import.meta.hot.data.remoteModifiedFiles = this.#modifiedFiles;
@@ -53,6 +116,8 @@ export class RemoteFilesStore {
     runtimeSessionStore.sessionState.subscribe((state) => {
       if (!state.runtimeToken) {
         this.#lastRuntimeToken = undefined;
+        this.#invalidateDirectoryCache();
+        this.#writeQueue.cancel();
         this.files.set({});
         this.#size = 0;
         this.#loadedFileContent.clear();
@@ -62,13 +127,15 @@ export class RemoteFilesStore {
 
       if (state.runtimeToken !== this.#lastRuntimeToken) {
         this.#lastRuntimeToken = state.runtimeToken;
-        this.refreshFromRemote().catch((error) => {
+        this.#invalidateDirectoryCache();
+        this.#writeQueue.cancel();
+        this.refreshFromRemote(true).catch((error) => {
           logger.error('Failed to refresh files after runtime token change', error);
         });
       }
     });
 
-    if (typeof window !== 'undefined') {
+    if (this.#options.enableDomObservers && typeof window !== 'undefined') {
       let lastChatId = getCurrentChatId();
 
       const observer = new MutationObserver(() => {
@@ -81,7 +148,7 @@ export class RemoteFilesStore {
           const nextChatId = currentChatId === 'default' ? undefined : currentChatId;
           runtimeSessionStore
             .ensureSession({ chatId: nextChatId, force: true })
-            .then(() => this.refreshFromRemote())
+            .then(() => this.refreshFromRemote(true))
             .catch((error: unknown) => {
               logger.warn('Failed to switch runtime session after chat change', error);
             });
@@ -95,9 +162,11 @@ export class RemoteFilesStore {
       }, LOCK_REFRESH_INTERVAL_MS);
     }
 
-    this.#init().catch((error) => {
-      logger.error('Remote files initialization failed', error);
-    });
+    if (this.#options.autoInit && typeof window !== 'undefined') {
+      this.#init().catch((error) => {
+        logger.error('Remote files initialization failed', error);
+      });
+    }
   }
 
   getFile(filePath: string) {
@@ -186,23 +255,23 @@ export class RemoteFilesStore {
     }
 
     await this.#ensureRuntimeDirectory(runtimeToken, path.dirname(filePath));
+    this.#invalidateDirectoryCache(runtimeToken);
 
-    const oldContent = this.getFile(filePath)?.content ?? '';
-    await runtimeApi.writeFile(runtimeToken, {
-      path: runtimePath,
-      content,
-      encoding: 'utf8',
-    });
+    const previousEntry = this.files.get()[filePath];
+    const previousLoaded = this.#loadedFileContent.has(filePath);
+    const previousSize = this.#size;
+    const hadModified = this.#modifiedFiles.has(filePath);
+    const previousModified = this.#modifiedFiles.get(filePath);
+    const oldContent = previousEntry?.type === 'file' ? previousEntry.content : '';
 
-    if (!this.#modifiedFiles.has(filePath)) {
+    if (!hadModified) {
       this.#modifiedFiles.set(filePath, oldContent);
     }
 
-    const currentFile = this.files.get()[filePath];
-    const isLocked = currentFile?.type === 'file' ? currentFile.isLocked : false;
-    const lockedByFolder = currentFile?.type === 'file' ? currentFile.lockedByFolder : undefined;
+    const isLocked = previousEntry?.type === 'file' ? previousEntry.isLocked : false;
+    const lockedByFolder = previousEntry?.type === 'file' ? previousEntry.lockedByFolder : undefined;
 
-    if (!currentFile) {
+    if (!previousEntry) {
       this.#size += 1;
     }
 
@@ -215,6 +284,41 @@ export class RemoteFilesStore {
       lockedByFolder,
     });
     this.#loadedFileContent.add(filePath);
+
+    try {
+      await this.#writeQueue.enqueue({
+        filePath,
+        path: runtimePath,
+        content,
+        encoding: 'utf8',
+      });
+    } catch (error) {
+      this.#size = previousSize;
+
+      if (previousEntry) {
+        this.files.setKey(filePath, previousEntry);
+      } else {
+        this.files.setKey(filePath, undefined);
+      }
+
+      if (previousLoaded) {
+        this.#loadedFileContent.add(filePath);
+      } else {
+        this.#loadedFileContent.delete(filePath);
+      }
+
+      if (hadModified) {
+        if (previousModified !== undefined) {
+          this.#modifiedFiles.set(filePath, previousModified);
+        } else {
+          this.#modifiedFiles.delete(filePath);
+        }
+      } else {
+        this.#modifiedFiles.delete(filePath);
+      }
+
+      throw error;
+    }
   }
 
   async createFile(filePath: string, content: string | Uint8Array = '') {
@@ -226,21 +330,19 @@ export class RemoteFilesStore {
     }
 
     await this.#ensureRuntimeDirectory(runtimeToken, path.dirname(filePath));
+    this.#invalidateDirectoryCache(runtimeToken);
 
     const isBinary = content instanceof Uint8Array;
     const payloadContent = isBinary ? Buffer.from(content).toString('base64') : (content as string);
-
-    await runtimeApi.writeFile(runtimeToken, {
-      path: runtimePath,
-      content: payloadContent,
-      encoding: isBinary ? 'base64' : 'utf8',
-    });
+    const previousEntry = this.files.get()[filePath];
+    const previousLoaded = this.#loadedFileContent.has(filePath);
+    const previousSize = this.#size;
+    const hadModified = this.#modifiedFiles.has(filePath);
+    const previousModified = this.#modifiedFiles.get(filePath);
 
     this.#ensureFolderTree(filePath);
 
-    const existing = this.files.get()[filePath];
-
-    if (!existing) {
+    if (!previousEntry) {
       this.#size += 1;
     }
 
@@ -248,12 +350,47 @@ export class RemoteFilesStore {
       type: 'file',
       content: payloadContent,
       isBinary,
-      isLocked: false,
+      isLocked: previousEntry?.type === 'file' ? previousEntry.isLocked : false,
+      lockedByFolder: previousEntry?.type === 'file' ? previousEntry.lockedByFolder : undefined,
     });
     this.#modifiedFiles.set(filePath, payloadContent);
     this.#loadedFileContent.add(filePath);
 
-    return true;
+    try {
+      await this.#writeQueue.enqueue({
+        filePath,
+        path: runtimePath,
+        content: payloadContent,
+        encoding: isBinary ? 'base64' : 'utf8',
+      });
+      return true;
+    } catch (error) {
+      this.#size = previousSize;
+
+      if (previousEntry) {
+        this.files.setKey(filePath, previousEntry);
+      } else {
+        this.files.setKey(filePath, undefined);
+      }
+
+      if (previousLoaded) {
+        this.#loadedFileContent.add(filePath);
+      } else {
+        this.#loadedFileContent.delete(filePath);
+      }
+
+      if (hadModified) {
+        if (previousModified !== undefined) {
+          this.#modifiedFiles.set(filePath, previousModified);
+        } else {
+          this.#modifiedFiles.delete(filePath);
+        }
+      } else {
+        this.#modifiedFiles.delete(filePath);
+      }
+
+      throw error;
+    }
   }
 
   async createFolder(folderPath: string) {
@@ -265,6 +402,7 @@ export class RemoteFilesStore {
     }
 
     await this.#ensureRuntimeDirectory(runtimeToken, folderPath);
+    this.#invalidateDirectoryCache(runtimeToken);
     this.#ensureFolderTree(folderPath);
     this.files.setKey(folderPath, { type: 'folder' });
 
@@ -279,7 +417,10 @@ export class RemoteFilesStore {
       throw new Error(`EINVAL: invalid file path, delete '${runtimePath}'`);
     }
 
+    await this.#writeQueue.flush(filePath);
     await runtimeApi.delete(runtimeToken, runtimePath, false);
+    this.#writeQueue.cancel(filePath);
+    this.#invalidateDirectoryCache(runtimeToken);
 
     const current = this.files.get()[filePath];
 
@@ -302,7 +443,12 @@ export class RemoteFilesStore {
       throw new Error(`EINVAL: invalid folder path, delete '${runtimePath}'`);
     }
 
+    await this.#writeQueue.flushMatching(
+      (entryPath) => entryPath === folderPath || entryPath.startsWith(`${folderPath}/`),
+    );
     await runtimeApi.delete(runtimeToken, runtimePath, true);
+    this.#writeQueue.cancelMatching((entryPath) => entryPath === folderPath || entryPath.startsWith(`${folderPath}/`));
+    this.#invalidateDirectoryCache(runtimeToken);
 
     const allFiles = this.files.get();
     const updates: FileMap = {};
@@ -499,16 +645,29 @@ export class RemoteFilesStore {
     return { isLocked: false };
   }
 
-  async refreshFromRemote() {
+  async refreshFromRemote(force = false) {
+    if (this.#refreshInFlight) {
+      return await this.#refreshInFlight;
+    }
+
+    this.#refreshInFlight = this.#refreshFromRemoteInternal(force).finally(() => {
+      this.#refreshInFlight = undefined;
+    });
+
+    return await this.#refreshInFlight;
+  }
+
+  async #refreshFromRemoteInternal(force = false) {
     const runtimeToken = await this.#ensureRuntimeToken();
     const nextFiles: FileMap = {
       [WORK_DIR]: { type: 'folder' },
     };
     const nextLoadedContent = new Set<string>();
+    const previousLoadedContent = new Set(this.#loadedFileContent);
     let nextSize = 0;
 
     const walk = async (runtimePath?: string) => {
-      const { entries } = await runtimeApi.listFiles(runtimeToken, runtimePath);
+      const entries = await this.#listDirectory(runtimeToken, runtimePath, force);
 
       for (const entry of entries || []) {
         const virtualPath = entry.virtualPath || path.join(WORK_DIR, entry.path);
@@ -541,7 +700,7 @@ export class RemoteFilesStore {
 
       const previous = previousFiles[filePath];
 
-      if (previous?.type === 'file' && previous.content) {
+      if (previous?.type === 'file' && previousLoadedContent.has(filePath)) {
         nextFiles[filePath] = {
           ...entry,
           content: previous.content,
@@ -564,15 +723,140 @@ export class RemoteFilesStore {
     await runtimeSessionStore.ensureSession({
       chatId: currentChatId === 'default' ? undefined : currentChatId,
     });
-    await this.refreshFromRemote();
+    await this.refreshFromRemote(true);
 
-    if (typeof window !== 'undefined') {
-      window.setInterval(() => {
-        this.refreshFromRemote().catch((error) => {
-          logger.warn('Periodic remote file refresh failed', error);
-        });
-      }, REMOTE_REFRESH_INTERVAL_MS);
+    if (this.#options.enableRefreshScheduler && typeof window !== 'undefined') {
+      this.#startRefreshScheduler();
     }
+  }
+
+  #startRefreshScheduler() {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    document.addEventListener('visibilitychange', this.#handleVisibilityChange);
+    this.#scheduleNextRefresh();
+  }
+
+  #handleVisibilityChange = () => {
+    if (typeof document === 'undefined' || document.hidden) {
+      return;
+    }
+
+    this.#refreshBackoff.hiddenAttempt = 0;
+
+    this.refreshFromRemote(true)
+      .catch((error) => {
+        logger.warn('Failed to refresh remote files after tab became visible', error);
+      })
+      .finally(() => {
+        this.#scheduleNextRefresh();
+      });
+  };
+
+  #scheduleNextRefresh() {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (this.#refreshBackoff.timer) {
+      clearTimeout(this.#refreshBackoff.timer);
+      this.#refreshBackoff.timer = undefined;
+    }
+
+    const hidden = typeof document !== 'undefined' && document.hidden;
+    const delayMs = hidden
+      ? getHiddenRefreshDelayMs(this.#refreshBackoff.hiddenAttempt)
+      : REMOTE_REFRESH_VISIBLE_INTERVAL_MS;
+
+    if (hidden) {
+      this.#refreshBackoff.hiddenAttempt = Math.min(
+        this.#refreshBackoff.hiddenAttempt + 1,
+        REMOTE_REFRESH_HIDDEN_BACKOFF_MS.length - 1,
+      );
+    } else {
+      this.#refreshBackoff.hiddenAttempt = 0;
+    }
+
+    this.#refreshBackoff.lastDelayMs = delayMs;
+    this.#refreshBackoff.timer = setTimeout(() => {
+      this.#refreshBackoff.timer = undefined;
+      this.refreshFromRemote()
+        .catch((error) => {
+          logger.warn('Periodic remote file refresh failed', error);
+        })
+        .finally(() => {
+          this.#scheduleNextRefresh();
+        });
+    }, delayMs);
+  }
+
+  #getDirectoryCacheKey(runtimeToken: string, runtimePath?: string) {
+    return `${runtimeToken}:${runtimePath || ''}`;
+  }
+
+  #invalidateDirectoryCache(runtimeToken?: string) {
+    if (!runtimeToken) {
+      this.#directoryCache.clear();
+      this.#directoryListInFlight.clear();
+
+      return;
+    }
+
+    const runtimePrefix = `${runtimeToken}:`;
+
+    for (const key of this.#directoryCache.keys()) {
+      if (key.startsWith(runtimePrefix)) {
+        this.#directoryCache.delete(key);
+      }
+    }
+
+    for (const key of this.#directoryListInFlight.keys()) {
+      if (key.startsWith(runtimePrefix)) {
+        this.#directoryListInFlight.delete(key);
+      }
+    }
+  }
+
+  async #listDirectory(runtimeToken: string, runtimePath?: string, force = false): Promise<RuntimeFileEntry[]> {
+    const cacheKey = this.#getDirectoryCacheKey(runtimeToken, runtimePath);
+    const now = Date.now();
+
+    if (!force) {
+      const cached = this.#directoryCache.get(cacheKey);
+
+      if (cached && cached.expiresAt > now) {
+        return cached.entries;
+      }
+
+      const inFlight = this.#directoryListInFlight.get(cacheKey);
+
+      if (inFlight) {
+        return await inFlight;
+      }
+    }
+
+    const requestPromise = runtimeApi
+      .listFiles(runtimeToken, runtimePath)
+      .then((response) => {
+        const entries = response.entries || [];
+        this.#directoryCache.set(cacheKey, {
+          runtimeToken,
+          runtimePath: runtimePath || '',
+          expiresAt: now + this.#options.directoryCacheTtlMs,
+          entries,
+        });
+
+        return entries;
+      })
+      .finally(() => {
+        this.#directoryListInFlight.delete(cacheKey);
+      });
+
+    this.#directoryListInFlight.set(cacheKey, requestPromise);
+
+    return await requestPromise;
   }
 
   async #ensureRuntimeToken() {

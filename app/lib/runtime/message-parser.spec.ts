@@ -293,6 +293,107 @@ describe('EnhancedStreamingMessageParser', () => {
     expect(callbacks.onActionOpen).not.toHaveBeenCalled();
   });
 
+  describe('Runtime-aware shell auto-wrap', () => {
+    it('keeps shell auto-wrap enabled for webcontainer runtime', () => {
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn(),
+      };
+
+      const parser = new EnhancedStreamingMessageParser({
+        callbacks,
+        runtimeProvider: 'webcontainer',
+      });
+
+      parser.parse('runtime_webcontainer_1', '```bash\nnpm install\n```');
+
+      expect(callbacks.onActionOpen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: expect.objectContaining({
+            type: 'shell',
+            content: 'npm install',
+          }),
+        }),
+      );
+    });
+
+    it('disables shell auto-wrap for dokploy runtime', () => {
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn(),
+      };
+
+      const parser = new EnhancedStreamingMessageParser({
+        callbacks,
+        runtimeProvider: 'dokploy',
+      });
+
+      const input = '```bash\nnpm install\n```';
+      const output = parser.parse('runtime_dokploy_1', input);
+
+      expect(output).toContain('```bash');
+      expect(callbacks.onActionOpen).not.toHaveBeenCalled();
+      expect(callbacks.onActionClose).not.toHaveBeenCalled();
+    });
+
+    it('keeps contextual file detection enabled for dokploy runtime', () => {
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn(),
+      };
+
+      const parser = new EnhancedStreamingMessageParser({
+        callbacks,
+        runtimeProvider: 'dokploy',
+      });
+
+      parser.parse('runtime_dokploy_2', 'Create a file called index.js:\n\n```javascript\nconsole.log("ok");\n```');
+
+      expect(callbacks.onActionOpen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: expect.objectContaining({
+            type: 'file',
+            filePath: '/index.js',
+          }),
+        }),
+      );
+    });
+
+    it('keeps explicit shell boltAction parsing enabled for dokploy runtime', () => {
+      const callbacks = {
+        onArtifactOpen: vi.fn(),
+        onArtifactClose: vi.fn(),
+        onActionOpen: vi.fn(),
+        onActionClose: vi.fn(),
+      };
+
+      const parser = new EnhancedStreamingMessageParser({
+        callbacks,
+        runtimeProvider: 'dokploy',
+      });
+
+      parser.parse(
+        'runtime_dokploy_3',
+        '<boltArtifact title="Shell" id="artifact_1"><boltAction type="shell">npm install</boltAction></boltArtifact>',
+      );
+
+      expect(callbacks.onActionClose).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: expect.objectContaining({
+            type: 'shell',
+            content: 'npm install',
+          }),
+        }),
+      );
+    });
+  });
+
   describe('AI Model Output Patterns Integration Tests', () => {
     let callbacks: {
       onArtifactOpen: any;

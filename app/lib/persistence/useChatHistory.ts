@@ -22,6 +22,7 @@ import type { Snapshot } from './types';
 import { detectProjectCommands, createCommandActionsString } from '~/utils/projectCommands';
 import type { ContextAnnotation } from '~/types/context';
 import { isDokployRuntime } from '~/lib/runtime-provider';
+import { restoreLegacyWebcontainerSnapshot } from '~/lib/legacy/webcontainer/chat-history';
 
 export interface ChatHistoryItem {
   id: string;
@@ -253,28 +254,7 @@ ${value.content}
       return;
     }
 
-    const { webcontainer } = await import('~/lib/webcontainer');
-    const container = await webcontainer;
-
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (key.startsWith(container.workdir)) {
-        key = key.replace(container.workdir, '');
-      }
-
-      if (value?.type === 'folder') {
-        await container.fs.mkdir(key, { recursive: true });
-      }
-    });
-    Object.entries(validSnapshot.files).forEach(async ([key, value]) => {
-      if (value?.type === 'file') {
-        if (key.startsWith(container.workdir)) {
-          key = key.replace(container.workdir, '');
-        }
-
-        await container.fs.writeFile(key, value.content, { encoding: value.isBinary ? undefined : 'utf8' });
-      } else {
-      }
-    });
+    await restoreLegacyWebcontainerSnapshot(validSnapshot);
 
     // workbenchStore.files.setKey(snapshot?.files)
   }, []);

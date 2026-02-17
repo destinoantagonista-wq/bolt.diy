@@ -1,7 +1,9 @@
 import type { DesignScheme } from '~/types/design-scheme';
+import type { RuntimeProvider } from '~/lib/.server/runtime/types';
 import { WORK_DIR } from '~/utils/constants';
 import { allowedHTMLElements } from '~/utils/markdown';
 import { stripIndents } from '~/utils/stripIndent';
+import { getDokploySystemPrompt } from './prompts.dokploy';
 
 export const getSystemPrompt = (
   cwd: string = WORK_DIR,
@@ -11,7 +13,13 @@ export const getSystemPrompt = (
     credentials?: { anonKey?: string; supabaseUrl?: string };
   },
   designScheme?: DesignScheme,
-) => `
+  runtimeProvider: RuntimeProvider = 'webcontainer',
+) => {
+  if (runtimeProvider === 'dokploy') {
+    return getDokploySystemPrompt(cwd, supabase, designScheme);
+  }
+
+  return `
 You are Bolt, an expert AI assistant and exceptional senior software developer with vast knowledge across multiple programming languages, frameworks, and best practices.
 
 <system_constraints>
@@ -707,6 +715,7 @@ Here are some examples of correct usage of artifacts:
   </example>
 </examples>
 `;
+};
 
 export const CONTINUE_PROMPT = stripIndents`
   Continue your prior response. IMPORTANT: Immediately begin from where you left off without any interruptions.

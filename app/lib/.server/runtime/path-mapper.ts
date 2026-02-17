@@ -3,11 +3,35 @@ import { path } from '~/utils/path';
 
 const normalize = (value: string) => value.replaceAll('\\', '/');
 const stripLeadingSlash = (value: string) => value.replace(/^\/+/, '');
+const WINDOWS_DRIVE_PATTERN = /^[a-zA-Z]:/;
+
+const decodePath = (value: string) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error('Invalid runtime path');
+  }
+};
 
 const ensureNoTraversal = (value: string) => {
-  const segments = normalize(value).split('/').filter(Boolean);
+  const normalized = normalize(value);
 
-  if (segments.some((segment) => segment === '..')) {
+  if (!normalized) {
+    return;
+  }
+
+  if (normalized.includes('\0') || normalized.toLowerCase().includes('%00')) {
+    throw new Error('Invalid runtime path');
+  }
+
+  if (WINDOWS_DRIVE_PATTERN.test(normalized)) {
+    throw new Error('Invalid runtime path');
+  }
+
+  const decoded = decodePath(normalized);
+  const segments = decoded.split('/').filter(Boolean);
+
+  if (segments.some((segment) => segment === '..' || segment === '.')) {
     throw new Error('Invalid runtime path');
   }
 };

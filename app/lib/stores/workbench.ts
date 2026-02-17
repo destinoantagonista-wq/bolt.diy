@@ -3,7 +3,6 @@ import type { EditorDocument, ScrollPosition } from '~/components/editor/codemir
 import { ActionRunner } from '~/lib/runtime/action-runner';
 import type { ActionCallbackData, ArtifactCallbackData } from '~/lib/runtime/message-parser';
 import { isDokployRuntime, runtimeProvider } from '~/lib/runtime-provider';
-import { webcontainer } from '~/lib/webcontainer';
 import type { ITerminal } from '~/types/terminal';
 import { WORK_DIR } from '~/utils/constants';
 import { unreachable } from '~/utils/unreachable';
@@ -65,6 +64,7 @@ type FilesStoreLike = Pick<
 
 type PreviewsStoreLike = {
   previews: PreviewsStore['previews'];
+  status: PreviewsStore['status'];
   refreshAllPreviews: () => void;
 };
 
@@ -78,6 +78,10 @@ type TerminalStoreLike = Pick<
   | 'detachTerminal'
   | 'onTerminalResize'
 >;
+
+interface LegacyWebcontainerLike {
+  workdir: string;
+}
 
 class DisabledTerminalStore implements TerminalStoreLike {
   showTerminal: WritableAtom<boolean> = atom(false);
@@ -101,14 +105,11 @@ class DisabledTerminalStore implements TerminalStoreLike {
 
 export class WorkbenchStore {
   #isDokployRuntime = isDokployRuntime;
-  #previewsStore: PreviewsStoreLike = this.#isDokployRuntime
-    ? new RemotePreviewsStore()
-    : new PreviewsStore(webcontainer);
-  #filesStore: FilesStoreLike = this.#isDokployRuntime ? new RemoteFilesStore() : new FilesStore(webcontainer);
-  #editorStore = new EditorStore(this.#filesStore);
-  #terminalStore: TerminalStoreLike = this.#isDokployRuntime
-    ? new DisabledTerminalStore()
-    : new TerminalStore(webcontainer);
+  #legacyWebcontainerPromise?: Promise<LegacyWebcontainerLike>;
+  #previewsStore: PreviewsStoreLike;
+  #filesStore: FilesStoreLike;
+  #editorStore: EditorStore;
+  #terminalStore: TerminalStoreLike;
 
   #reloadedMessages = new Set<string>();
 
@@ -126,7 +127,31 @@ export class WorkbenchStore {
   modifiedFiles = new Set<string>();
   artifactIdList: string[] = [];
   #globalExecutionQueue = Promise.resolve();
+
+  #getLegacyWebcontainerPromise() {
+    if (!this.#legacyWebcontainerPromise) {
+      this.#legacyWebcontainerPromise = import('~/lib/legacy/webcontainer/runtime').then((module) =>
+        module.getLegacyWebcontainer(),
+      );
+    }
+
+    return this.#legacyWebcontainerPromise;
+  }
+
   constructor() {
+    if (this.#isDokployRuntime) {
+      this.#previewsStore = new RemotePreviewsStore();
+      this.#filesStore = new RemoteFilesStore();
+      this.#terminalStore = new DisabledTerminalStore();
+    } else {
+      const legacyWebcontainerPromise = this.#getLegacyWebcontainerPromise();
+      this.#previewsStore = new PreviewsStore(legacyWebcontainerPromise as any);
+      this.#filesStore = new FilesStore(legacyWebcontainerPromise as any);
+      this.#terminalStore = new TerminalStore(legacyWebcontainerPromise as any);
+    }
+
+    this.#editorStore = new EditorStore(this.#filesStore);
+
     if (this.#isDokployRuntime) {
       this.#terminalStore.showTerminal.set(false);
     }
@@ -165,6 +190,10 @@ export class WorkbenchStore {
 
   get previews() {
     return this.#previewsStore.previews;
+  }
+
+  get previewStatus() {
+    return this.#previewsStore.status;
   }
 
   get runtimeProvider() {
@@ -578,7 +607,7 @@ export class WorkbenchStore {
       closed: false,
       type,
       runner: new ActionRunner(
-        webcontainer,
+        this.#isDokployRuntime ? undefined : (this.#getLegacyWebcontainerPromise() as any),
         () => this.boltTerminal,
         (alert) => {
           if (this.#reloadedMessages.has(messageId)) {
@@ -663,7 +692,7 @@ export class WorkbenchStore {
     if (data.action.type === 'file') {
       const fullPath = this.#isDokployRuntime
         ? path.join(WORK_DIR, data.action.filePath)
-        : path.join((await webcontainer).workdir, data.action.filePath);
+        : path.join((await this.#getLegacyWebcontainerPromise()).workdir, data.action.filePath);
 
       /*
        * For scoped locks, we would need to implement diff checking here

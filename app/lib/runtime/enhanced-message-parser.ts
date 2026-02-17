@@ -11,6 +11,7 @@ const logger = createScopedLogger('EnhancedMessageParser');
 export class EnhancedStreamingMessageParser extends StreamingMessageParser {
   private _processedCodeBlocks = new Map<string, Set<string>>();
   private _artifactCounter = 0;
+  private _runtimeProvider: 'webcontainer' | 'dokploy';
 
   // Optimized command pattern lookup
   private _commandPatternMap = new Map<string, RegExp>([
@@ -30,6 +31,7 @@ export class EnhancedStreamingMessageParser extends StreamingMessageParser {
 
   constructor(options: StreamingMessageParserOptions = {}) {
     super(options);
+    this._runtimeProvider = options.runtimeProvider ?? 'webcontainer';
   }
 
   parse(messageId: string, input: string): string {
@@ -130,6 +132,10 @@ export class EnhancedStreamingMessageParser extends StreamingMessageParser {
 
         // Check if this should be treated as a shell command instead of a file
         if (this._isShellCommand(content, language)) {
+          if (this._runtimeProvider === 'dokploy') {
+            return match;
+          }
+
           processed.add(blockHash);
           logger.debug(`Auto-wrapped code block as shell command instead of file`);
 
@@ -496,6 +502,10 @@ ${content.trim()}
   }
 
   private _detectAndWrapShellCommands(_messageId: string, input: string, processed: Set<string>): string {
+    if (this._runtimeProvider === 'dokploy') {
+      return input;
+    }
+
     // Pattern to detect standalone shell code blocks that look like commands
     const shellCommandPattern = /```(bash|sh|shell|zsh|fish|powershell|ps1)\n([\s\S]*?)```/gi;
 

@@ -1,8 +1,33 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { type ZodTypeAny, z } from 'zod';
 import { getRuntimeServerConfig } from './config';
 
+const REQUEST_ID_HEADER = 'x-request-id';
+const REQUEST_ID_PATTERN = /^[a-zA-Z0-9._:-]{1,128}$/;
+const AUTHORIZATION_HEADER_PATTERN = /^Bearer\s+(.+)$/i;
+
+export class RuntimeRouteError extends Error {
+  status: number;
+  code?: string;
+  details?: unknown;
+
+  constructor(message: string, status: number, code?: string, details?: unknown) {
+    super(message);
+    this.name = 'RuntimeRouteError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export const getRuntimeRequestId = (request: Request) => {
-  return request.headers.get('x-request-id') || crypto.randomUUID();
+  const headerValue = request.headers.get(REQUEST_ID_HEADER)?.trim();
+
+  if (headerValue && REQUEST_ID_PATTERN.test(headerValue)) {
+    return headerValue;
+  }
+
+  return crypto.randomUUID();
 };
 
 export const getRuntimeConfigFromContext = (args: Pick<ActionFunctionArgs | LoaderFunctionArgs, 'context'>) => {
@@ -10,11 +35,133 @@ export const getRuntimeConfigFromContext = (args: Pick<ActionFunctionArgs | Load
   return getRuntimeServerConfig(env);
 };
 
-export const getRuntimeTokenFromRequest = async (request: Request): Promise<string | null> => {
+const getBearerToken = (request: Request) => {
   const header = request.headers.get('authorization') || request.headers.get('Authorization');
 
-  if (header?.startsWith('Bearer ')) {
-    return header.slice('Bearer '.length).trim();
+  if (!header) {
+    return null;
+  }
+
+  const match = header.match(AUTHORIZATION_HEADER_PATTERN);
+
+  if (!match) {
+    return null;
+  }
+
+  const token = match[1]?.trim();
+
+  return token || null;
+};
+
+const formatSchemaError = (error: z.ZodError) => {
+  const firstIssue = error.issues[0];
+
+  if (!firstIssue) {
+    return 'Invalid request payload';
+  }
+
+  return firstIssue.message || 'Invalid request payload';
+};
+
+export const runtimeErrorResponse = (
+  message: string,
+  status: number,
+  code?: string,
+  headers?: HeadersInit,
+  details?: unknown,
+) => {
+  const payload: Record<string, unknown> = {
+    error: message,
+  };
+
+  if (code) {
+    payload.code = code;
+  }
+
+  if (details !== undefined) {
+    payload.details = details;
+  }
+
+  return jsonResponse(payload, status, headers);
+};
+
+export const assertMethod = (request: Request, methods: string | string[]) => {
+  const allowedMethods = Array.isArray(methods) ? methods : [methods];
+
+  if (!allowedMethods.includes(request.method)) {
+    throw new RuntimeRouteError('Method not allowed', 405, 'METHOD_NOT_ALLOWED');
+  }
+};
+
+export const parseJsonBody = async <TSchema extends ZodTypeAny>(
+  request: Request,
+  schema: TSchema,
+): Promise<z.infer<TSchema>> => {
+  const rawText = await request.text();
+  let payload: unknown = {};
+
+  if (rawText.trim().length > 0) {
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      throw new RuntimeRouteError('Invalid JSON body', 400, 'BAD_REQUEST');
+    }
+  }
+
+  const parsed = schema.safeParse(payload);
+
+  if (!parsed.success) {
+    throw new RuntimeRouteError(formatSchemaError(parsed.error), 400, 'BAD_REQUEST', parsed.error.flatten());
+  }
+
+  return parsed.data;
+};
+
+export const parseQuery = <TSchema extends ZodTypeAny>(request: Request, schema: TSchema): z.infer<TSchema> => {
+  const query = Object.fromEntries(new URL(request.url).searchParams.entries());
+  const parsed = schema.safeParse(query);
+
+  if (!parsed.success) {
+    throw new RuntimeRouteError(formatSchemaError(parsed.error), 400, 'BAD_REQUEST', parsed.error.flatten());
+  }
+
+  return parsed.data;
+};
+
+export const requireRuntimeToken = (
+  request: Request,
+  options?: {
+    bodyRuntimeToken?: string | null | undefined;
+    queryRuntimeToken?: string | null | undefined;
+  },
+) => {
+  const headerToken = getBearerToken(request);
+
+  if (headerToken) {
+    return headerToken;
+  }
+
+  const bodyToken = options?.bodyRuntimeToken?.trim();
+
+  if (bodyToken) {
+    return bodyToken;
+  }
+
+  const queryToken =
+    options?.queryRuntimeToken?.trim() || new URL(request.url).searchParams.get('runtimeToken')?.trim();
+
+  if (queryToken) {
+    return queryToken;
+  }
+
+  throw new RuntimeRouteError('Missing runtime token', 401, 'MISSING_RUNTIME_TOKEN');
+};
+
+export const getRuntimeTokenFromRequest = async (request: Request): Promise<string | null> => {
+  const headerToken = getBearerToken(request);
+
+  if (headerToken) {
+    return headerToken;
   }
 
   if (request.method !== 'GET') {

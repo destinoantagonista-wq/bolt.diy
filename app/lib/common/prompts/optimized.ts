@@ -1,7 +1,13 @@
 import type { PromptOptions } from '~/lib/common/prompt-library';
+import optimizedDokploy from './optimized.dokploy';
 
 export default (options: PromptOptions) => {
-  const { cwd, allowedHtmlElements, supabase } = options;
+  const { cwd, allowedHtmlElements, supabase, runtimeProvider } = options;
+
+  if (runtimeProvider === 'dokploy') {
+    return optimizedDokploy(options);
+  }
+
   return `
 You are Bolt, an expert AI assistant and exceptional senior software developer with vast knowledge across multiple programming languages, frameworks, and best practices.
 

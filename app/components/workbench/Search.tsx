@@ -5,126 +5,9 @@ import { debounce } from '~/utils/debounce';
 import { isDokployRuntime } from '~/lib/runtime-provider';
 import { runtimeApi } from '~/lib/runtime-client/runtime-api';
 import { runtimeSessionStore } from '~/lib/stores/runtimeSession';
+import { searchLegacyWebcontainer, type LegacySearchMatch } from '~/lib/legacy/webcontainer/search';
 
-interface DisplayMatch {
-  path: string;
-  lineNumber: number;
-  previewText: string;
-  matchCharStart: number;
-  matchCharEnd: number;
-}
-
-interface TextSearchRange {
-  startLineNumber: number;
-  startColumn: number;
-  endColumn: number;
-}
-
-interface TextSearchPreviewMatch {
-  startLineNumber: number;
-}
-
-interface TextSearchPreview {
-  text: string;
-  matches: TextSearchPreviewMatch[];
-}
-
-interface TextSearchApiMatch {
-  preview: TextSearchPreview;
-  ranges: TextSearchRange[];
-}
-
-interface TextSearchOptions {
-  homeDir: string;
-  includes: string[];
-  excludes: string[];
-  gitignore: boolean;
-  requireGit: boolean;
-  globalIgnoreFiles: boolean;
-  ignoreSymlinks: boolean;
-  resultLimit: number;
-  isRegex: boolean;
-  caseSensitive: boolean;
-  isWordMatch: boolean;
-  folders: string[];
-}
-
-type TextSearchOnProgressCallback = (filePath: string, apiMatches: TextSearchApiMatch[]) => void;
-
-interface WebContainerLike {
-  internal?: {
-    textSearch?: (
-      query: string,
-      options: TextSearchOptions,
-      onProgress: TextSearchOnProgressCallback,
-    ) => Promise<unknown>;
-  };
-}
-
-const getWebcontainer = async (): Promise<WebContainerLike> => {
-  const module = await import('~/lib/webcontainer');
-  return await module.webcontainer;
-};
-
-async function performTextSearch(
-  instance: WebContainerLike,
-  query: string,
-  options: Omit<TextSearchOptions, 'folders'>,
-  onProgress: (results: DisplayMatch[]) => void,
-): Promise<void> {
-  if (!instance || typeof instance.internal?.textSearch !== 'function') {
-    console.error('WebContainer instance not available or internal searchText method is missing/not a function.');
-
-    return;
-  }
-
-  const searchOptions: TextSearchOptions = {
-    ...options,
-    folders: [WORK_DIR],
-  };
-
-  const progressCallback: TextSearchOnProgressCallback = (filePath, apiMatches) => {
-    const displayMatches: DisplayMatch[] = [];
-
-    apiMatches.forEach((apiMatch) => {
-      const previewLines = apiMatch.preview.text.split('\n');
-
-      apiMatch.ranges.forEach((range) => {
-        let previewLineText = '(Preview line not found)';
-        let lineIndexInPreview = -1;
-
-        if (apiMatch.preview.matches.length > 0) {
-          const previewStartLine = apiMatch.preview.matches[0].startLineNumber;
-          lineIndexInPreview = range.startLineNumber - previewStartLine;
-        }
-
-        if (lineIndexInPreview >= 0 && lineIndexInPreview < previewLines.length) {
-          previewLineText = previewLines[lineIndexInPreview];
-        } else {
-          previewLineText = previewLines[0] ?? '(Preview unavailable)';
-        }
-
-        displayMatches.push({
-          path: filePath,
-          lineNumber: range.startLineNumber,
-          previewText: previewLineText,
-          matchCharStart: range.startColumn,
-          matchCharEnd: range.endColumn,
-        });
-      });
-    });
-
-    if (displayMatches.length > 0) {
-      onProgress(displayMatches);
-    }
-  };
-
-  try {
-    await instance.internal.textSearch(query, searchOptions, progressCallback);
-  } catch (error) {
-    console.error('Error during internal text search:', error);
-  }
-}
+type DisplayMatch = LegacySearchMatch;
 
 function groupResultsByFile(results: DisplayMatch[]): Record<string, DisplayMatch[]> {
   return results.reduce(
@@ -209,26 +92,11 @@ export function Search() {
         return;
       }
 
-      const instance = await getWebcontainer();
-      const options: Omit<TextSearchOptions, 'folders'> = {
-        homeDir: WORK_DIR, // Adjust this path as needed
-        includes: ['**/*.*'],
-        excludes: ['**/node_modules/**', '**/package-lock.json', '**/.git/**', '**/dist/**', '**/*.lock'],
-        gitignore: true,
-        requireGit: false,
-        globalIgnoreFiles: true,
-        ignoreSymlinks: false,
-        resultLimit: 500,
-        isRegex: false,
-        caseSensitive: false,
-        isWordMatch: false,
-      };
-
       const progressHandler = (batchResults: DisplayMatch[]) => {
         setSearchResults((prevResults) => [...prevResults, ...batchResults]);
       };
 
-      await performTextSearch(instance, query, options, progressHandler);
+      await searchLegacyWebcontainer(query, progressHandler);
     } catch (error) {
       console.error('Failed to initiate search:', error);
     } finally {

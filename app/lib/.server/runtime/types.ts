@@ -3,6 +3,7 @@ export type RuntimeProvider = 'webcontainer' | 'dokploy';
 export type RuntimeSessionStatus = 'creating' | 'deploying' | 'ready' | 'error' | 'deleted';
 
 export type RuntimeDeployStatus = 'queued' | 'running' | 'done' | 'error';
+export type RuntimeRolloutCohort = 'stable' | 'canary';
 
 export interface RuntimeSession {
   projectId: string;
@@ -12,6 +13,8 @@ export interface RuntimeSession {
   previewUrl: string;
   status: RuntimeSessionStatus;
   expiresAt: string;
+  serverId?: string;
+  rolloutCohort?: RuntimeRolloutCohort;
 }
 
 export interface RuntimeTokenClaims {
@@ -43,4 +46,5 @@ export interface RuntimeMetadata {
   createdAt: string;
   lastSeenAt: string;
   idleTtlSec: number;
+  rolloutCohort?: RuntimeRolloutCohort;
 }

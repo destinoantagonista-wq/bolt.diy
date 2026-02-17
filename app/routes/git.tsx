@@ -15,7 +15,7 @@ export async function loader(args: LoaderFunctionArgs) {
   const env = (args.context as any)?.cloudflare?.env as Record<string, unknown> | undefined;
   const config = getRuntimeServerConfig(env);
 
-  if (config.runtimeProvider === 'dokploy') {
+  if (config.runtimeProvider === 'dokploy' || !config.enableWebcontainerLegacy) {
     throw redirect('/');
   }
 

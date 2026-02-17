@@ -1,38 +1,37 @@
 import type { ActionFunctionArgs } from '@remix-run/cloudflare';
+import { filesDeleteBodySchema } from '~/lib/.server/runtime/route-schemas';
 import { DokployClient } from '~/lib/.server/runtime/dokploy-client';
 import { toRuntimePath } from '~/lib/.server/runtime/path-mapper';
 import { mapRuntimeRouteError, withRuntimeClaims } from '~/lib/.server/runtime/session-orchestrator';
 import {
+  assertMethod,
   getRuntimeConfigFromContext,
   getRuntimeRequestId,
-  getRuntimeTokenFromRequest,
   jsonResponse,
+  parseJsonBody,
+  requireRuntimeToken,
+  runtimeErrorResponse,
 } from '~/lib/.server/runtime/route-utils';
 
 export const action = async (args: ActionFunctionArgs) => {
   try {
+    assertMethod(args.request, 'DELETE');
+
     const config = getRuntimeConfigFromContext(args);
 
     if (config.runtimeProvider !== 'dokploy') {
-      return jsonResponse({ error: 'Runtime provider is not dokploy' }, 400);
+      return runtimeErrorResponse('Runtime provider is not dokploy', 400, 'BAD_REQUEST');
     }
 
-    if (args.request.method !== 'DELETE') {
-      return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
-
-    const runtimeToken = await getRuntimeTokenFromRequest(args.request);
-
-    if (!runtimeToken) {
-      return jsonResponse({ error: 'Missing runtime token' }, 401);
-    }
-
-    const body = (await args.request.json()) as any;
-    const path = toRuntimePath(typeof body?.path === 'string' ? body.path : '');
-    const recursive = Boolean(body?.recursive);
+    const body = await parseJsonBody(args.request, filesDeleteBodySchema);
+    const runtimeToken = requireRuntimeToken(args.request, {
+      bodyRuntimeToken: body.runtimeToken,
+    });
+    const path = toRuntimePath(body.path);
+    const recursive = Boolean(body.recursive);
 
     if (!path) {
-      return jsonResponse({ error: 'Missing path' }, 400);
+      return runtimeErrorResponse('Missing path', 400, 'BAD_REQUEST');
     }
 
     const claims = await withRuntimeClaims({ config, runtimeToken });

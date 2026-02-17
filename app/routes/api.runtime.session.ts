@@ -1,4 +1,5 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { sessionActionQuerySchema, sessionCreateBodySchema } from '~/lib/.server/runtime/route-schemas';
 import {
   createRuntimeSession,
   deleteRuntimeSession,
@@ -6,27 +7,32 @@ import {
   mapRuntimeRouteError,
 } from '~/lib/.server/runtime/session-orchestrator';
 import {
+  assertMethod,
   buildActorCookieHeader,
   getOrCreateActorId,
   getRuntimeConfigFromContext,
   getRuntimeRequestId,
-  getRuntimeTokenFromRequest,
   jsonResponse,
+  parseJsonBody,
+  parseQuery,
+  requireRuntimeToken,
+  runtimeErrorResponse,
 } from '~/lib/.server/runtime/route-utils';
 
 export const loader = async (args: LoaderFunctionArgs) => {
   try {
+    assertMethod(args.request, 'GET');
+
     const config = getRuntimeConfigFromContext(args);
 
     if (config.runtimeProvider !== 'dokploy') {
-      return jsonResponse({ error: 'Runtime provider is not dokploy' }, 400);
+      return runtimeErrorResponse('Runtime provider is not dokploy', 400, 'BAD_REQUEST');
     }
 
-    const runtimeToken = await getRuntimeTokenFromRequest(args.request);
-
-    if (!runtimeToken) {
-      return jsonResponse({ error: 'Missing runtime token' }, 401);
-    }
+    const query = parseQuery(args.request, sessionActionQuerySchema);
+    const runtimeToken = requireRuntimeToken(args.request, {
+      queryRuntimeToken: query.runtimeToken,
+    });
 
     const requestId = getRuntimeRequestId(args.request);
     const result = await getRuntimeSession({
@@ -48,27 +54,29 @@ export const loader = async (args: LoaderFunctionArgs) => {
 
 export const action = async (args: ActionFunctionArgs) => {
   try {
+    assertMethod(args.request, ['POST', 'DELETE']);
+
     const config = getRuntimeConfigFromContext(args);
 
     if (config.runtimeProvider !== 'dokploy') {
-      return jsonResponse({ error: 'Runtime provider is not dokploy' }, 400);
+      return runtimeErrorResponse('Runtime provider is not dokploy', 400, 'BAD_REQUEST');
     }
 
     const requestId = getRuntimeRequestId(args.request);
+    const query = parseQuery(args.request, sessionActionQuerySchema);
 
     if (args.request.method === 'POST') {
-      const payload = ((await args.request.json().catch(() => ({}))) as any) || {};
-      const chatId = typeof payload?.chatId === 'string' ? payload.chatId : '';
-      const templateId = typeof payload?.templateId === 'string' ? payload.templateId : undefined;
-      const bodyRuntimeToken = typeof payload?.runtimeToken === 'string' ? payload.runtimeToken : '';
-      const intent = new URL(args.request.url).searchParams.get('intent');
+      const body = await parseJsonBody(args.request, sessionCreateBodySchema);
+      const chatId = body.chatId;
+      const templateId = body.templateId;
+      const bodyRuntimeToken = body.runtimeToken;
+      const intent = query.intent;
 
       if (intent === 'delete' || (!chatId && bodyRuntimeToken)) {
-        const runtimeToken = bodyRuntimeToken || (await getRuntimeTokenFromRequest(args.request));
-
-        if (!runtimeToken) {
-          return jsonResponse({ error: 'Missing runtime token' }, 401);
-        }
+        const runtimeToken = requireRuntimeToken(args.request, {
+          bodyRuntimeToken,
+          queryRuntimeToken: query.runtimeToken,
+        });
 
         const result = await deleteRuntimeSession({
           config,
@@ -80,7 +88,7 @@ export const action = async (args: ActionFunctionArgs) => {
       }
 
       if (!chatId) {
-        return jsonResponse({ error: 'chatId is required' }, 400);
+        return runtimeErrorResponse('chatId is required', 400, 'BAD_REQUEST');
       }
 
       const actorId = getOrCreateActorId(args.request);
@@ -106,11 +114,11 @@ export const action = async (args: ActionFunctionArgs) => {
     }
 
     if (args.request.method === 'DELETE') {
-      const runtimeToken = await getRuntimeTokenFromRequest(args.request);
-
-      if (!runtimeToken) {
-        return jsonResponse({ error: 'Missing runtime token' }, 401);
-      }
+      const body = await parseJsonBody(args.request, sessionCreateBodySchema);
+      const runtimeToken = requireRuntimeToken(args.request, {
+        bodyRuntimeToken: body.runtimeToken,
+        queryRuntimeToken: query.runtimeToken,
+      });
 
       const result = await deleteRuntimeSession({
         config,
@@ -121,7 +129,7 @@ export const action = async (args: ActionFunctionArgs) => {
       return jsonResponse(result);
     }
 
-    return jsonResponse({ error: 'Method not allowed' }, 405);
+    return runtimeErrorResponse('Method not allowed', 405, 'METHOD_NOT_ALLOWED');
   } catch (error) {
     return mapRuntimeRouteError(error);
   }

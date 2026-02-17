@@ -36,7 +36,6 @@ import LlmErrorAlert from './LLMApiAlert';
 import { AgentQueuePanel } from './AgentQueuePanel';
 import type { AgentQueueItem } from '~/types/agent-queue';
 import { AgentRealtimeFeed } from './AgentRealtimeFeed';
-import { isDokployRuntime } from '~/lib/runtime-provider';
 
 const TEXTAREA_MIN_HEIGHT = 76;
 
@@ -537,7 +536,7 @@ export const BaseChat = React.forwardRef<HTMLDivElement, BaseChatProps>(
               {!chatStarted && (
                 <div className="flex justify-center gap-2">
                   {ImportButtons(importChat)}
-                  {!isDokployRuntime && <GitCloneButton importChat={importChat} />}
+                  <GitCloneButton importChat={importChat} />
                 </div>
               )}
               <div className="flex flex-col gap-5">

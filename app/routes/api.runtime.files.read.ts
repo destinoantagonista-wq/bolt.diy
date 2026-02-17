@@ -1,33 +1,34 @@
 import type { LoaderFunctionArgs } from '@remix-run/cloudflare';
+import { filesReadQuerySchema } from '~/lib/.server/runtime/route-schemas';
 import { DokployClient } from '~/lib/.server/runtime/dokploy-client';
 import { toRuntimePath, toVirtualPath } from '~/lib/.server/runtime/path-mapper';
 import { mapRuntimeRouteError, withRuntimeClaims } from '~/lib/.server/runtime/session-orchestrator';
 import {
+  assertMethod,
   getRuntimeConfigFromContext,
   getRuntimeRequestId,
-  getRuntimeTokenFromRequest,
   jsonResponse,
+  parseQuery,
+  requireRuntimeToken,
+  runtimeErrorResponse,
 } from '~/lib/.server/runtime/route-utils';
 
 export const loader = async (args: LoaderFunctionArgs) => {
   try {
+    assertMethod(args.request, 'GET');
+
     const config = getRuntimeConfigFromContext(args);
 
     if (config.runtimeProvider !== 'dokploy') {
-      return jsonResponse({ error: 'Runtime provider is not dokploy' }, 400);
+      return runtimeErrorResponse('Runtime provider is not dokploy', 400, 'BAD_REQUEST');
     }
 
-    const runtimeToken = await getRuntimeTokenFromRequest(args.request);
-
-    if (!runtimeToken) {
-      return jsonResponse({ error: 'Missing runtime token' }, 401);
-    }
-
-    const url = new URL(args.request.url);
-    const path = toRuntimePath(url.searchParams.get('path') || '');
+    const runtimeToken = requireRuntimeToken(args.request);
+    const query = parseQuery(args.request, filesReadQuerySchema);
+    const path = toRuntimePath(query.path);
 
     if (!path) {
-      return jsonResponse({ error: 'Missing path' }, 400);
+      return runtimeErrorResponse('Missing path', 400, 'BAD_REQUEST');
     }
 
     const claims = await withRuntimeClaims({ config, runtimeToken });

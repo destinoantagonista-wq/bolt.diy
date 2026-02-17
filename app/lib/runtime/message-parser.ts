@@ -45,6 +45,7 @@ type ElementFactory = (props: ElementFactoryProps) => string;
 export interface StreamingMessageParserOptions {
   callbacks?: ParserCallbacks;
   artifactElement?: ElementFactory;
+  runtimeProvider?: 'webcontainer' | 'dokploy';
 }
 
 interface MessageState {

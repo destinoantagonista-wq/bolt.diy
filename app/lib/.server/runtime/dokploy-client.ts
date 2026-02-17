@@ -1,8 +1,107 @@
+import { createScopedLogger } from '~/utils/logger';
 import type { RuntimeFileEntry } from './types';
 
 type ProcedureType = 'query' | 'mutation';
+type TrpcErrorCode = string;
 
-class DokployClientError extends Error {
+const logger = createScopedLogger('DokployClient');
+const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+export interface DokployProjectSummary {
+  projectId: string;
+  name: string;
+  environments?: DokployEnvironmentSummary[];
+  [key: string]: unknown;
+}
+
+export interface DokployEnvironmentSummary {
+  environmentId: string;
+  name?: string;
+  isDefault?: boolean;
+  compose?: DokployCompose[];
+  [key: string]: unknown;
+}
+
+export interface DokployProjectDetails extends DokployProjectSummary {
+  environments: DokployEnvironmentSummary[];
+}
+
+export interface DokployProjectCreateResult {
+  project: {
+    projectId: string;
+    name: string;
+    [key: string]: unknown;
+  };
+  environment?: {
+    environmentId: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface DokployCompose {
+  composeId: string;
+  name?: string;
+  appName?: string;
+  description?: string | null;
+  composeStatus?: string;
+  environmentId?: string;
+  environment?: {
+    projectId?: string;
+    project?: {
+      projectId?: string;
+      organizationId?: string;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export interface DokployDeployment {
+  deploymentId: string;
+  status: string;
+  createdAt?: string;
+  [key: string]: unknown;
+}
+
+export interface DokployDomain {
+  domainId: string;
+  host: string;
+  port?: number;
+  path?: string;
+  https?: boolean;
+  composeId?: string;
+  serviceName?: string;
+  [key: string]: unknown;
+}
+
+export interface DokployServer {
+  serverId: string;
+  name?: string;
+  ipAddress?: string;
+  serverType?: string;
+  [key: string]: unknown;
+}
+
+export interface DokployFileReadResult extends RuntimeFileEntry {
+  type: 'file';
+  content: string;
+  encoding: 'utf8' | 'base64';
+  isBinary: boolean;
+  [key: string]: unknown;
+}
+
+interface TrpcErrorPayload {
+  message?: string;
+  data?: {
+    code?: TrpcErrorCode;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+export class DokployClientError extends Error {
   status: number;
   code?: string;
   details?: unknown;
@@ -29,15 +128,71 @@ const mapTrpcCodeToHttp = (code?: string) => {
   switch (code) {
     case 'UNAUTHORIZED':
       return 401;
+    case 'FORBIDDEN':
+      return 403;
     case 'NOT_FOUND':
       return 404;
     case 'BAD_REQUEST':
       return 400;
-    case 'FORBIDDEN':
-      return 403;
+    case 'CONFLICT':
+      return 409;
+    case 'PAYLOAD_TOO_LARGE':
+      return 413;
+    case 'TOO_MANY_REQUESTS':
+      return 429;
+    case 'NOT_IMPLEMENTED':
+      return 501;
     default:
       return 502;
   }
+};
+
+const isObject = (value: unknown): value is Record<string, unknown> => {
+  return value !== null && typeof value === 'object';
+};
+
+const sanitizeStatus = (status: number, fallback = 502) => {
+  if (Number.isInteger(status) && status >= 400 && status <= 599) {
+    return status;
+  }
+
+  return fallback;
+};
+
+const isAbortError = (error: unknown) => {
+  return (
+    (typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError') ||
+    (isObject(error) && error.name === 'AbortError')
+  );
+};
+
+const isNetworkError = (error: unknown) => {
+  return error instanceof TypeError;
+};
+
+const ensureNonEmptyString = (value: string | undefined, key: string) => {
+  if (!value || value.trim().length === 0) {
+    throw new DokployClientError(`${key} is required`, 400, 'BAD_REQUEST');
+  }
+
+  return value.trim();
+};
+
+const resolveRequestId = (requestId?: string) => {
+  const normalized = (requestId || '').trim();
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+
+  return crypto.randomUUID();
+};
+
+const getRetryDelayMs = (attempt: number) => {
+  const exponential = 200 * 2 ** attempt;
+  const jitter = Math.floor(Math.random() * 120);
+
+  return Math.min(2_000, exponential + jitter);
 };
 
 export class DokployClient {
@@ -47,10 +202,121 @@ export class DokployClient {
   #maxRetries: number;
 
   constructor(options: DokployClientOptions) {
-    this.#baseUrl = options.baseUrl.replace(/\/+$/, '');
-    this.#apiKey = options.apiKey;
+    this.#baseUrl = ensureNonEmptyString(options.baseUrl, 'baseUrl').replace(/\/+$/, '');
+    this.#apiKey = ensureNonEmptyString(options.apiKey, 'apiKey');
     this.#timeoutMs = options.timeoutMs ?? 20_000;
-    this.#maxRetries = options.maxRetries ?? 2;
+    this.#maxRetries = Math.max(0, options.maxRetries ?? 2);
+  }
+
+  #isRetryable(error: DokployClientError) {
+    return TRANSIENT_HTTP_STATUSES.has(error.status);
+  }
+
+  #normalizeError(error: unknown, procedure: string) {
+    if (error instanceof DokployClientError) {
+      return error;
+    }
+
+    if (isAbortError(error)) {
+      return new DokployClientError(`Dokploy request timed out: ${procedure}`, 504, 'TIMEOUT', {
+        procedure,
+      });
+    }
+
+    if (isNetworkError(error)) {
+      return new DokployClientError(`Dokploy network error: ${procedure}`, 502, 'NETWORK_ERROR', {
+        procedure,
+      });
+    }
+
+    return new DokployClientError(`Dokploy request failed: ${procedure}`, 502, 'INTERNAL_SERVER_ERROR', {
+      procedure,
+      cause: error,
+    });
+  }
+
+  async #parsePayload(response: Response, procedure: string): Promise<unknown> {
+    const raw = await response.text();
+
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(raw) as unknown;
+    } catch {
+      throw new DokployClientError(`Invalid JSON response from Dokploy (${procedure})`, 502, 'INVALID_JSON_RESPONSE', {
+        procedure,
+        status: response.status,
+        responseBodySample: raw.slice(0, 1000),
+      });
+    }
+  }
+
+  #extractResult<T>(response: Response, payload: unknown, procedure: string): T {
+    if (payload === null) {
+      throw new DokployClientError(`Invalid tRPC envelope from Dokploy (${procedure})`, 502, 'INVALID_TRPC_RESPONSE', {
+        procedure,
+        status: response.status,
+      });
+    }
+
+    const envelope = Array.isArray(payload) ? payload[0] : payload;
+
+    if (!isObject(envelope)) {
+      throw new DokployClientError(`Invalid tRPC envelope from Dokploy (${procedure})`, 502, 'INVALID_TRPC_RESPONSE', {
+        procedure,
+        status: response.status,
+      });
+    }
+
+    const trpcError = envelope.error as TrpcErrorPayload | undefined;
+
+    if (trpcError) {
+      const code = trpcError?.data?.code;
+      const status = mapTrpcCodeToHttp(code);
+      const message = trpcError.message || `Dokploy tRPC error (${procedure})`;
+      throw new DokployClientError(message, status, code, envelope);
+    }
+
+    if (!response.ok) {
+      throw new DokployClientError(
+        `Dokploy HTTP error (${procedure}): ${response.status} ${response.statusText}`,
+        sanitizeStatus(response.status),
+        'HTTP_ERROR',
+        envelope,
+      );
+    }
+
+    if (!('result' in envelope)) {
+      throw new DokployClientError(`Missing tRPC result from Dokploy (${procedure})`, 502, 'INVALID_TRPC_RESPONSE', {
+        procedure,
+        status: response.status,
+        envelope,
+      });
+    }
+
+    const result = envelope.result;
+
+    if (result === undefined || result === null) {
+      return result as T;
+    }
+
+    if (!isObject(result)) {
+      return result as T;
+    }
+
+    const data = result.data;
+
+    if (data === undefined) {
+      return result as T;
+    }
+
+    if (isObject(data) && 'json' in data) {
+      return (data as { json: T }).json;
+    }
+
+    return data as T;
   }
 
   async #request<T>(procedure: string, type: ProcedureType, input?: unknown, requestId?: string): Promise<T> {
@@ -60,6 +326,7 @@ export class DokployClient {
         json: input ?? null,
       },
     });
+    const resolvedRequestId = resolveRequestId(requestId);
 
     url.searchParams.set('batch', '1');
 
@@ -69,11 +336,8 @@ export class DokployClient {
 
     const headers: Record<string, string> = {
       'x-api-key': this.#apiKey,
+      'x-request-id': resolvedRequestId,
     };
-
-    if (requestId) {
-      headers['x-request-id'] = requestId;
-    }
 
     const fetchInit: RequestInit = {
       method: type === 'query' ? 'GET' : 'POST',
@@ -84,68 +348,109 @@ export class DokployClient {
       ...(type === 'mutation' ? { body: batchInput } : {}),
     };
 
+    const maxAttempts = this.#maxRetries + 1;
     let attempt = 0;
-    let lastError: unknown;
 
-    while (attempt <= this.#maxRetries) {
+    while (attempt < maxAttempts) {
+      const attemptNumber = attempt + 1;
+      const startedAt = Date.now();
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
+      const timeoutHandle = setTimeout(() => controller.abort(), this.#timeoutMs);
+
+      logger.debug('Dokploy request start', {
+        requestId: resolvedRequestId,
+        procedure,
+        type,
+        attempt: attemptNumber,
+      });
 
       try {
         const response = await fetch(url.toString(), {
           ...fetchInit,
           signal: controller.signal,
         });
-        clearTimeout(timeout);
+        const payload = await this.#parsePayload(response, procedure);
+        const result = this.#extractResult<T>(response, payload, procedure);
+        const latencyMs = Date.now() - startedAt;
 
-        const payload = await response.json();
-        const item = Array.isArray(payload) ? payload[0] : payload;
-        const trpcError = item?.error;
+        logger.info('Dokploy request success', {
+          requestId: resolvedRequestId,
+          procedure,
+          type,
+          attempt: attemptNumber,
+          status: response.status,
+          latencyMs,
+        });
 
-        if (!response.ok || trpcError) {
-          const code = trpcError?.data?.code as string | undefined;
-          const message = trpcError?.message || response.statusText || 'Dokploy request failed';
-          throw new DokployClientError(message, response.ok ? mapTrpcCodeToHttp(code) : response.status, code, item);
-        }
-
-        return (item?.result?.data?.json ?? item?.result?.data ?? item?.result ?? null) as T;
+        return result;
       } catch (error) {
-        clearTimeout(timeout);
-        lastError = error;
+        const normalizedError = this.#normalizeError(error, procedure);
+        const latencyMs = Date.now() - startedAt;
+        const retryable = this.#isRetryable(normalizedError);
+        const isLastAttempt = attemptNumber >= maxAttempts;
 
-        const isLastAttempt = attempt >= this.#maxRetries;
+        logger[retryable && !isLastAttempt ? 'warn' : 'error']('Dokploy request failed', {
+          requestId: resolvedRequestId,
+          procedure,
+          type,
+          attempt: attemptNumber,
+          latencyMs,
+          retryable,
+          status: normalizedError.status,
+          code: normalizedError.code,
+          message: normalizedError.message,
+        });
 
-        if (isLastAttempt) {
-          break;
+        if (!retryable || isLastAttempt) {
+          throw normalizedError;
         }
 
-        await sleep(250 * 2 ** attempt);
-        attempt += 1;
+        await sleep(getRetryDelayMs(attempt));
+      } finally {
+        clearTimeout(timeoutHandle);
       }
+
+      attempt += 1;
     }
 
-    if (lastError instanceof DokployClientError) {
-      throw lastError;
-    }
-
-    throw new DokployClientError('Dokploy request failed', 502, 'INTERNAL_SERVER_ERROR', lastError);
+    throw new DokployClientError(`Dokploy request exhausted retries: ${procedure}`, 502, 'RETRY_EXHAUSTED', {
+      procedure,
+    });
   }
 
   // project
   projectAll(requestId?: string) {
-    return this.#request<any[]>('project.all', 'query', undefined, requestId);
+    return this.#request<DokployProjectSummary[]>('project.all', 'query', undefined, requestId);
   }
 
   projectOne(projectId: string, requestId?: string) {
-    return this.#request<any>('project.one', 'query', { projectId }, requestId);
+    return this.#request<DokployProjectDetails>(
+      'project.one',
+      'query',
+      { projectId: ensureNonEmptyString(projectId, 'projectId') },
+      requestId,
+    );
   }
 
   projectCreate(input: { name: string; description?: string; env?: string }, requestId?: string) {
-    return this.#request<any>('project.create', 'mutation', input, requestId);
+    return this.#request<DokployProjectCreateResult>(
+      'project.create',
+      'mutation',
+      {
+        ...input,
+        name: ensureNonEmptyString(input.name, 'name'),
+      },
+      requestId,
+    );
   }
 
   projectRemove(projectId: string, requestId?: string) {
-    return this.#request<any>('project.remove', 'mutation', { projectId }, requestId);
+    return this.#request<Record<string, unknown>>(
+      'project.remove',
+      'mutation',
+      { projectId: ensureNonEmptyString(projectId, 'projectId') },
+      requestId,
+    );
   }
 
   // compose
@@ -161,37 +466,84 @@ export class DokployClient {
     },
     requestId?: string,
   ) {
-    return this.#request<any>('compose.create', 'mutation', input, requestId);
+    return this.#request<DokployCompose>(
+      'compose.create',
+      'mutation',
+      {
+        ...input,
+        name: ensureNonEmptyString(input.name, 'name'),
+        environmentId: ensureNonEmptyString(input.environmentId, 'environmentId'),
+      },
+      requestId,
+    );
   }
 
   composeOne(composeId: string, requestId?: string) {
-    return this.#request<any>('compose.one', 'query', { composeId }, requestId);
+    return this.#request<DokployCompose>(
+      'compose.one',
+      'query',
+      { composeId: ensureNonEmptyString(composeId, 'composeId') },
+      requestId,
+    );
   }
 
-  composeUpdate(input: Record<string, unknown>, requestId?: string) {
-    return this.#request<any>('compose.update', 'mutation', input, requestId);
+  composeUpdate(input: { composeId: string } & Record<string, unknown>, requestId?: string) {
+    return this.#request<DokployCompose>(
+      'compose.update',
+      'mutation',
+      {
+        ...input,
+        composeId: ensureNonEmptyString(input.composeId, 'composeId'),
+      },
+      requestId,
+    );
   }
 
   composeDeploy(composeId: string, requestId?: string) {
-    return this.#request<any>('compose.deploy', 'mutation', { composeId }, requestId);
+    return this.#request<{ success?: boolean; message?: string; composeId?: string } | true>(
+      'compose.deploy',
+      'mutation',
+      { composeId: ensureNonEmptyString(composeId, 'composeId') },
+      requestId,
+    );
   }
 
   composeRedeploy(composeId: string, reason?: string, requestId?: string) {
-    return this.#request<any>('compose.redeploy', 'mutation', { composeId, description: reason }, requestId);
+    return this.#request<{ success?: boolean; message?: string; composeId?: string } | true>(
+      'compose.redeploy',
+      'mutation',
+      { composeId: ensureNonEmptyString(composeId, 'composeId'), description: reason },
+      requestId,
+    );
   }
 
   composeDelete(composeId: string, deleteVolumes = true, requestId?: string) {
-    return this.#request<any>('compose.delete', 'mutation', { composeId, deleteVolumes }, requestId);
+    return this.#request<DokployCompose | Record<string, unknown>>(
+      'compose.delete',
+      'mutation',
+      { composeId: ensureNonEmptyString(composeId, 'composeId'), deleteVolumes },
+      requestId,
+    );
   }
 
   // deployment
   deploymentAllByCompose(composeId: string, requestId?: string) {
-    return this.#request<any[]>('deployment.allByCompose', 'query', { composeId }, requestId);
+    return this.#request<DokployDeployment[]>(
+      'deployment.allByCompose',
+      'query',
+      { composeId: ensureNonEmptyString(composeId, 'composeId') },
+      requestId,
+    );
   }
 
   // domain
   domainGenerateDomain(appName: string, serverId?: string, requestId?: string) {
-    return this.#request<string>('domain.generateDomain', 'mutation', { appName, serverId }, requestId);
+    return this.#request<string>(
+      'domain.generateDomain',
+      'mutation',
+      { appName: ensureNonEmptyString(appName, 'appName'), serverId },
+      requestId,
+    );
   }
 
   domainCreate(
@@ -208,28 +560,60 @@ export class DokployClient {
     },
     requestId?: string,
   ) {
-    return this.#request<any>('domain.create', 'mutation', input, requestId);
+    return this.#request<DokployDomain>(
+      'domain.create',
+      'mutation',
+      {
+        ...input,
+        host: ensureNonEmptyString(input.host, 'host'),
+        composeId: ensureNonEmptyString(input.composeId, 'composeId'),
+        serviceName: ensureNonEmptyString(input.serviceName, 'serviceName'),
+      },
+      requestId,
+    );
   }
 
   domainByComposeId(composeId: string, requestId?: string) {
-    return this.#request<any[]>('domain.byComposeId', 'query', { composeId }, requestId);
+    return this.#request<DokployDomain[]>(
+      'domain.byComposeId',
+      'query',
+      { composeId: ensureNonEmptyString(composeId, 'composeId') },
+      requestId,
+    );
   }
 
   // server
   serverWithSshKey(requestId?: string) {
-    return this.#request<any[]>('server.withSSHKey', 'query', undefined, requestId);
+    return this.#request<DokployServer[]>('server.withSSHKey', 'query', undefined, requestId);
   }
 
   // file manager
   fileList(input: { serviceId: string; serviceType: 'compose'; path?: string }, requestId?: string) {
-    return this.#request<RuntimeFileEntry[]>('fileManager.list', 'query', input, requestId);
+    return this.#request<RuntimeFileEntry[]>(
+      'fileManager.list',
+      'query',
+      {
+        ...input,
+        serviceId: ensureNonEmptyString(input.serviceId, 'serviceId'),
+      },
+      requestId,
+    );
   }
 
   fileRead(
     input: { serviceId: string; serviceType: 'compose'; path: string; encoding?: 'utf8' | 'base64' },
     requestId?: string,
   ) {
-    return this.#request<any>('fileManager.read', 'query', input, requestId);
+    return this.#request<DokployFileReadResult>(
+      'fileManager.read',
+      'query',
+      {
+        ...input,
+        serviceId: ensureNonEmptyString(input.serviceId, 'serviceId'),
+        path: ensureNonEmptyString(input.path, 'path'),
+      },
+      requestId,
+    );
   }
 
   fileWrite(
@@ -243,18 +627,45 @@ export class DokployClient {
     },
     requestId?: string,
   ) {
-    return this.#request<any>('fileManager.write', 'mutation', input, requestId);
+    return this.#request<Record<string, unknown>>(
+      'fileManager.write',
+      'mutation',
+      {
+        ...input,
+        serviceId: ensureNonEmptyString(input.serviceId, 'serviceId'),
+        path: ensureNonEmptyString(input.path, 'path'),
+      },
+      requestId,
+    );
   }
 
   fileMkdir(input: { serviceId: string; serviceType: 'compose'; path: string }, requestId?: string) {
-    return this.#request<any>('fileManager.mkdir', 'mutation', input, requestId);
+    return this.#request<Record<string, unknown>>(
+      'fileManager.mkdir',
+      'mutation',
+      {
+        ...input,
+        serviceId: ensureNonEmptyString(input.serviceId, 'serviceId'),
+        path: ensureNonEmptyString(input.path, 'path'),
+      },
+      requestId,
+    );
   }
 
   fileDelete(
     input: { serviceId: string; serviceType: 'compose'; path: string; recursive?: boolean },
     requestId?: string,
   ) {
-    return this.#request<any>('fileManager.delete', 'mutation', input, requestId);
+    return this.#request<Record<string, unknown>>(
+      'fileManager.delete',
+      'mutation',
+      {
+        ...input,
+        serviceId: ensureNonEmptyString(input.serviceId, 'serviceId'),
+        path: ensureNonEmptyString(input.path, 'path'),
+      },
+      requestId,
+    );
   }
 
   fileSearch(
@@ -269,7 +680,16 @@ export class DokployClient {
     },
     requestId?: string,
   ) {
-    return this.#request<RuntimeFileEntry[]>('fileManager.search', 'query', input, requestId);
+    return this.#request<RuntimeFileEntry[]>(
+      'fileManager.search',
+      'query',
+      {
+        ...input,
+        serviceId: ensureNonEmptyString(input.serviceId, 'serviceId'),
+        query: ensureNonEmptyString(input.query, 'query'),
+      },
+      requestId,
+    );
   }
 }
 

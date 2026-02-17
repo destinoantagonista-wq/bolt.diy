@@ -1,33 +1,32 @@
 import type { ActionFunctionArgs } from '@remix-run/cloudflare';
+import { redeployBodySchema } from '~/lib/.server/runtime/route-schemas';
 import { DokployClient } from '~/lib/.server/runtime/dokploy-client';
 import { mapRuntimeRouteError, withRuntimeClaims } from '~/lib/.server/runtime/session-orchestrator';
 import {
+  assertMethod,
   getRuntimeConfigFromContext,
   getRuntimeRequestId,
-  getRuntimeTokenFromRequest,
   jsonResponse,
+  parseJsonBody,
+  requireRuntimeToken,
+  runtimeErrorResponse,
 } from '~/lib/.server/runtime/route-utils';
 
 export const action = async (args: ActionFunctionArgs) => {
   try {
+    assertMethod(args.request, 'POST');
+
     const config = getRuntimeConfigFromContext(args);
 
     if (config.runtimeProvider !== 'dokploy') {
-      return jsonResponse({ error: 'Runtime provider is not dokploy' }, 400);
+      return runtimeErrorResponse('Runtime provider is not dokploy', 400, 'BAD_REQUEST');
     }
 
-    if (args.request.method !== 'POST') {
-      return jsonResponse({ error: 'Method not allowed' }, 405);
-    }
-
-    const runtimeToken = await getRuntimeTokenFromRequest(args.request);
-
-    if (!runtimeToken) {
-      return jsonResponse({ error: 'Missing runtime token' }, 401);
-    }
-
-    const body = ((await args.request.json().catch(() => ({}))) as any) || {};
-    const reason = typeof body?.reason === 'string' ? body.reason : undefined;
+    const body = await parseJsonBody(args.request, redeployBodySchema);
+    const runtimeToken = requireRuntimeToken(args.request, {
+      bodyRuntimeToken: body.runtimeToken,
+    });
+    const reason = body.reason;
     const claims = await withRuntimeClaims({ config, runtimeToken });
     const requestId = getRuntimeRequestId(args.request);
     const client = new DokployClient({

@@ -68,10 +68,11 @@ class ActionCommandError extends Error {
 }
 
 export class ActionRunner {
-  #webcontainer: Promise<WebContainer>;
+  #webcontainer?: Promise<WebContainer>;
   #runtimeProvider: 'webcontainer' | 'dokploy';
   #currentExecutionPromise: Promise<void> = Promise.resolve();
   #shellTerminal: () => BoltShell;
+  #hasShownUnsupportedDokployAlert = false;
   runnerId = atom<string>(`${Date.now()}`);
   actions: ActionsMap = map({});
   onAlert?: (alert: ActionAlert) => void;
@@ -80,7 +81,7 @@ export class ActionRunner {
   buildOutput?: { path: string; exitCode: number; output: string };
 
   constructor(
-    webcontainerPromise: Promise<WebContainer>,
+    webcontainerPromise: Promise<WebContainer> | undefined,
     getShellTerminal: () => BoltShell,
     onAlert?: (alert: ActionAlert) => void,
     onSupabaseAlert?: (alert: SupabaseAlert) => void,
@@ -166,12 +167,16 @@ export class ActionRunner {
           status: 'failed',
           error: 'unsupported_in_v1',
         });
-        this.onAlert?.({
-          type: 'error',
-          title: 'Action unavailable in Dokploy V1',
-          description: `Action type "${action.type}" is not supported in Dokploy runtime V1.`,
-          content: action.content,
-        });
+
+        if (!this.#hasShownUnsupportedDokployAlert) {
+          this.#hasShownUnsupportedDokployAlert = true;
+          this.onAlert?.({
+            type: 'error',
+            title: 'Action unavailable in Dokploy V1',
+            description: `Action type "${action.type}" is not supported in Dokploy runtime V1.`,
+            content: action.content,
+          });
+        }
 
         return;
       }
@@ -339,7 +344,7 @@ export class ActionRunner {
       return;
     }
 
-    const webcontainer = await this.#webcontainer;
+    const webcontainer = await this.#requireWebcontainer('file actions');
     const relativePath = nodePath.relative(webcontainer.workdir, action.filePath);
 
     let folder = nodePath.dirname(relativePath);
@@ -376,7 +381,7 @@ export class ActionRunner {
     }
 
     try {
-      const webcontainer = await this.#webcontainer;
+      const webcontainer = await this.#requireWebcontainer('file history');
       const historyPath = this.#getHistoryPath(filePath);
       const content = await webcontainer.fs.readFile(historyPath, 'utf-8');
 
@@ -419,7 +424,7 @@ export class ActionRunner {
       source: 'netlify',
     });
 
-    const webcontainer = await this.#webcontainer;
+    const webcontainer = await this.#requireWebcontainer('build actions');
 
     // Create a new terminal specifically for the build
     const buildProcess = await webcontainer.spawn('npm', ['run', 'build']);
@@ -620,7 +625,7 @@ export class ActionRunner {
 
         // Check if any of the files exist using WebContainer
         try {
-          const webcontainer = await this.#webcontainer;
+          const webcontainer = await this.#requireWebcontainer('shell command validation');
           const existingFiles = [];
 
           for (const filePath of filePaths) {
@@ -665,7 +670,7 @@ export class ActionRunner {
         const targetDir = cdMatch[1].trim();
 
         try {
-          const webcontainer = await this.#webcontainer;
+          const webcontainer = await this.#requireWebcontainer('shell command validation');
           await webcontainer.fs.readdir(targetDir);
         } catch {
           return {
@@ -685,7 +690,7 @@ export class ActionRunner {
         const sourceFile = parts[1];
 
         try {
-          const webcontainer = await this.#webcontainer;
+          const webcontainer = await this.#requireWebcontainer('shell command validation');
           await webcontainer.fs.readFile(sourceFile);
         } catch {
           return {
@@ -786,5 +791,13 @@ export class ActionRunner {
       title: `Command Failed (exit code: ${exitCode})`,
       details: `Command: ${trimmedCommand}\n\nOutput: ${output || 'No output available'}${suggestion}`,
     };
+  }
+
+  async #requireWebcontainer(context: string): Promise<WebContainer> {
+    if (!this.#webcontainer) {
+      throw new Error(`WebContainer is required for ${context}`);
+    }
+
+    return await this.#webcontainer;
   }
 }
